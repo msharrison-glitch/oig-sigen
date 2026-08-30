@@ -71,6 +71,11 @@ POLL_INTERVAL = 300.0
 # short notice, and every minute we are slow to notice is imported at peak.
 DISPATCH_POLL_INTERVAL = 120.0
 
+# In bonus-only mode the whole value is short-notice slots, and the schedule
+# is known to churn overnight -- slots appear, move and are withdrawn. Poll at
+# this rate throughout, not just while holding one.
+BONUS_POLL_INTERVAL = 120.0
+
 # Actuation is 18-31 s, so lead the opening boundary comfortably.
 COMMAND_LEAD = 60.0
 # Release is 5-15 s. Give the price boundary a wider berth than that: the
@@ -209,6 +214,8 @@ class Reconciler:
         self.heartbeat_url = heartbeat_url
         self.site_token = site_token
         self.bonus_only = bonus_only
+        self._slots: list[Slot] = []
+        self._known: set[tuple[str, str, str]] | None = None
         self.client = client
         self.octopus = octopus
         self.charge_kw = charge_kw
@@ -219,6 +226,32 @@ class Reconciler:
         self._holding_dispatch = False
 
     # -- inputs ----------------------------------------------------------
+
+    def _note_changes(self, slots: list[Slot]) -> None:
+        """Log what moved since the last poll.
+
+        Octopus revises the dispatch schedule through the night. A slot that
+        quietly vanishes mid-charge is the expensive case, so say so out loud
+        rather than just behaving differently.
+        """
+        current = {(s.start.isoformat(), s.end.isoformat(), s.source)
+                   for s in slots}
+        if self._known is None:            # first poll: nothing to compare
+            self._known = current
+            return
+        for start, end, source in sorted(current - self._known):
+            log.info("SCHEDULE + added   %s -> %s [%s]",
+                     datetime.fromisoformat(start).astimezone(LOCAL_TZ)
+                     .strftime("%H:%M"),
+                     datetime.fromisoformat(end).astimezone(LOCAL_TZ)
+                     .strftime("%H:%M"), source)
+        for start, end, source in sorted(self._known - current):
+            log.warning("SCHEDULE - WITHDRAWN %s -> %s [%s]",
+                        datetime.fromisoformat(start).astimezone(LOCAL_TZ)
+                        .strftime("%H:%M"),
+                        datetime.fromisoformat(end).astimezone(LOCAL_TZ)
+                        .strftime("%H:%M"), source)
+        self._known = current
 
     def fetch_slots(self, now: datetime) -> list[Slot]:
         if self.octopus is None:
@@ -233,6 +266,7 @@ class Reconciler:
             slots = self.octopus.cheap_slots(SCHEDULE_HORIZON_HOURS, now,
                                              self.bonus_only)
             self._last_source = "octopus"
+            self._note_changes(slots)
             return slots
         except (OctopusError, OSError) as exc:
             # Conservative on purpose: we keep the window we can prove and
@@ -299,6 +333,7 @@ class Reconciler:
     def tick(self, now: datetime | None = None) -> str:
         now = now or utcnow()
         slots = self.fetch_slots(now)
+        self._slots = slots            # reused by sleep_seconds; do NOT refetch
         target = desired_slot(slots, now)
         state = self.read_plant()
 
@@ -349,6 +384,7 @@ class Reconciler:
             "mode": state.mode,
             "enable": state.enable,
             "action": action,
+            "slots_known": len(self._slots),
             "agent_version": AGENT_VERSION,
         }
         request = urllib.request.Request(
@@ -366,8 +402,12 @@ class Reconciler:
             return False
 
     def sleep_seconds(self, now: datetime, slots: list[Slot]) -> float:
-        cap = (DISPATCH_POLL_INTERVAL if self._holding_dispatch
-               else POLL_INTERVAL)
+        if self._holding_dispatch:
+            cap = DISPATCH_POLL_INTERVAL
+        elif self.bonus_only:
+            cap = BONUS_POLL_INTERVAL
+        else:
+            cap = POLL_INTERVAL
         event = next_event(slots, now)
         if event is None:
             return cap
@@ -383,7 +423,7 @@ class Reconciler:
             now = utcnow()
             try:
                 self.tick(now)
-                slots = self.fetch_slots(now)
+                slots = self._slots      # tick() already polled; one call only
             except (ModbusError, OSError) as exc:
                 # Fail safe: we would rather give the plant back and lose a
                 # cheap slot than hold a charge command we cannot see.

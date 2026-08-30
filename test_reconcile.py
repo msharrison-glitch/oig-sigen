@@ -252,6 +252,36 @@ def main() -> int:
           reconcile.another_controller_running(), 1)
     control.clear_state()
 
+    print("\nThe schedule churns overnight, so poll and notice")
+    plant_c = make_plant(soc_pct=50.0)
+    oct_c = FakeOctopus([])
+    rec_c = reconcile.Reconciler(client_for(plant_c), oct_c, 5.0, 95.0,
+                                 bonus_only=True)
+    oct_c.calls = 0
+    rec_c.tick(now)
+    check("one tick makes exactly one Octopus call", oct_c.calls, 1)
+    check("and the slots are cached for the sleep calculation",
+          rec_c._slots, [])
+
+    bonus = slot_at(now, 30, 60, "dispatch")
+    oct_c.slots = [bonus]
+    rec_c.tick(now)
+    check("a newly appeared slot is picked up", len(rec_c._slots), 1)
+    oct_c.slots = []
+    rec_c.tick(now)
+    check("and a withdrawn one disappears again", len(rec_c._slots), 0)
+    check("three ticks, three calls -- not six", oct_c.calls, 3)
+
+    print("\nBonus-only polls harder, because that is where the value is")
+    rec_c._holding_dispatch = False
+    check("bonus-only cadence", rec_c.sleep_seconds(now, []),
+          reconcile.BONUS_POLL_INTERVAL)
+    rec_d = reconciler(make_plant(), FakeOctopus([]))
+    check("normal cadence is slower", rec_d.sleep_seconds(now, []),
+          reconcile.POLL_INTERVAL)
+    check("bonus cadence is not slower than the normal one",
+          reconcile.BONUS_POLL_INTERVAL <= reconcile.POLL_INTERVAL, True)
+
     print("\nSleeping only until the decision could change")
     rec = reconciler(make_plant(), FakeOctopus([]))
     check("no events -> the poll interval caps it",
