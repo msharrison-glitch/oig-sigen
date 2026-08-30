@@ -11,7 +11,7 @@ that butts onto it, and the horizon filter.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import octopus as O
 
@@ -107,6 +107,36 @@ def main() -> int:
     merged = O.merge([a, b])
     check("two overlapping become one", len(merged), 1)
     check("union spans both", merged[0].minutes, 120.0)
+
+    print("\nBonus isolation: what is left once Sigen AI has the window")
+    # The only part worth commanding on a plant whose own EMS already covers
+    # 23:30-05:30 is the time Octopus adds outside it.
+    from zoneinfo import ZoneInfo as _Z
+    _tz = _Z("Europe/London")
+    _base = datetime(2026, 8, 30, 12, 0, tzinfo=timezone.utc)
+    _guaranteed = O.off_peak_windows(_base, 24)
+
+    def _d(day, h, m, dur):
+        st = datetime(2026, 8, day, h, m, tzinfo=_tz).astimezone(timezone.utc)
+        return O.Slot(st, st + timedelta(minutes=dur), "dispatch", 5.0)
+
+    def _frag(slot):
+        return [(f.local()[0].strftime("%H:%M"), f.local()[1].strftime("%H:%M"))
+                for f in O.merge(O.subtract([slot], _guaranteed))]
+
+    check("a slot outside the window survives whole",
+          _frag(_d(30, 14, 0, 30)), [("14:00", "14:30")])
+    check("a slot abutting the start is trimmed at 23:30",
+          _frag(_d(30, 23, 0, 60)), [("23:00", "23:30")])
+    check("a slot inside the window is dropped entirely",
+          _frag(_d(31, 1, 0, 30)), [])
+    check("a slot straddling the end keeps only the tail",
+          _frag(_d(31, 5, 0, 60)), [("05:30", "06:00")])
+    check("a slot spanning the window splits in two",
+          _frag(_d(30, 22, 0, 9 * 60)),
+          [("22:00", "23:30"), ("05:30", "07:00")])
+    check("subtracting nothing changes nothing",
+          len(O.subtract([_d(30, 14, 0, 30)], [])), 1)
 
     print("\n" + "=" * 72)
     if failures:

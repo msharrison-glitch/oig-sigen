@@ -204,9 +204,11 @@ class Reconciler:
     def __init__(self, client: SigenClient, octopus: OctopusClient | None,
                  charge_kw: float, target_soc: float,
                  dry_run: bool = False, heartbeat_url: str | None = None,
-                 site_token: str | None = None) -> None:
+                 site_token: str | None = None,
+                 bonus_only: bool = False) -> None:
         self.heartbeat_url = heartbeat_url
         self.site_token = site_token
+        self.bonus_only = bonus_only
         self.client = client
         self.octopus = octopus
         self.charge_kw = charge_kw
@@ -220,15 +222,29 @@ class Reconciler:
 
     def fetch_slots(self, now: datetime) -> list[Slot]:
         if self.octopus is None:
+            if self.bonus_only:
+                # Bonus slots exist only in the API. With no client there is
+                # nothing to act on, and the guaranteed window is not ours.
+                self._last_source = "no Octopus client, bonus-only"
+                return []
             self._last_source = "off-peak only (no Octopus client)"
             return fallback_slots(now, SCHEDULE_HORIZON_HOURS)
         try:
-            slots = self.octopus.cheap_slots(SCHEDULE_HORIZON_HOURS, now)
+            slots = self.octopus.cheap_slots(SCHEDULE_HORIZON_HOURS, now,
+                                             self.bonus_only)
             self._last_source = "octopus"
             return slots
         except (OctopusError, OSError) as exc:
             # Conservative on purpose: we keep the window we can prove and
             # drop every bonus slot we cannot.
+            if self.bonus_only:
+                # There is no offline fallback for bonus slots: they are
+                # knowable only from the API. Command nothing rather than
+                # guess, and let the plant's own EMS carry on.
+                log.warning("Octopus unreachable (%s) -- no bonus slots can "
+                            "be confirmed, so commanding nothing", exc)
+                self._last_source = "fallback (bonus-only: none)"
+                return []
             log.warning("Octopus unreachable (%s) -- falling back to the "
                         "guaranteed off-peak window only", exc)
             self._last_source = "fallback"
@@ -441,6 +457,11 @@ def main() -> int:
                         help="log decisions but write no registers")
     parser.add_argument("--no-octopus", action="store_true",
                         help="ignore bonus slots; guaranteed window only")
+    parser.add_argument("--bonus-only", action="store_true",
+                        help="command ONLY the extra slots outside "
+                             "23:30-05:30. Recommended on a plant running "
+                             "Sigen AI, which already handles the "
+                             "guaranteed window")
     parser.add_argument("--heartbeat-url",
                         help="off-box watchdog, e.g. "
                              "https://host/v1/heartbeat")
@@ -481,7 +502,8 @@ def main() -> int:
             rec = Reconciler(client, octopus, args.kw, args.target_soc,
                              dry_run=args.dry_run,
                              heartbeat_url=args.heartbeat_url,
-                             site_token=args.site_token)
+                             site_token=args.site_token,
+                             bonus_only=args.bonus_only)
 
             def on_signal(signum, _frame):
                 log.info("caught signal %d", signum)

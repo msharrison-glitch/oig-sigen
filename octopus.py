@@ -191,6 +191,34 @@ def merge(slots: list[Slot]) -> list[Slot]:
     return merged
 
 
+def subtract(slots: list[Slot], minus: list[Slot]) -> list[Slot]:
+    """Remove the `minus` periods from `slots`, keeping the fragments.
+
+    Used to isolate the *bonus* time: a dispatch that runs 23:00-00:30 is
+    only worth commanding for its first half hour, because the guaranteed
+    window takes over at 23:30 and the plant's own EMS already handles that.
+    A slot can be split in two if a minus period sits inside it.
+    """
+    out: list[Slot] = []
+    for slot in slots:
+        fragments = [(slot.start, slot.end)]
+        for gap in minus:
+            nxt = []
+            for start, end in fragments:
+                if gap.end <= start or gap.start >= end:
+                    nxt.append((start, end))       # no overlap
+                    continue
+                if gap.start > start:
+                    nxt.append((start, gap.start))  # keep the head
+                if gap.end < end:
+                    nxt.append((gap.end, end))      # keep the tail
+            fragments = nxt
+        for start, end in fragments:
+            if end > start:
+                out.append(Slot(start, end, slot.source, slot.kwh))
+    return out
+
+
 def parse_dispatches(payload: dict) -> list[Slot]:
     """Turn the GraphQL response into Slots.
 
@@ -288,14 +316,24 @@ class OctopusClient:
             raise
 
     def cheap_slots(self, horizon_hours: int = 24,
-                    now: datetime | None = None) -> list[Slot]:
-        """Merged off-peak windows and bonus dispatch slots."""
+                    now: datetime | None = None,
+                    bonus_only: bool = False) -> list[Slot]:
+        """Cheap periods over the horizon.
+
+        By default: the guaranteed windows merged with the bonus dispatch
+        slots. With bonus_only, the guaranteed windows are *subtracted*
+        instead, leaving just the extra time Octopus has released — which is
+        the only part a plant already running Sigen AI needs help with.
+        """
         now = now or datetime.now(timezone.utc)
-        slots = off_peak_windows(now, horizon_hours)
-        slots += parse_dispatches(self.dispatches())
+        guaranteed = off_peak_windows(now, horizon_hours)
+        dispatches = parse_dispatches(self.dispatches())
+        if bonus_only:
+            slots = merge(subtract(dispatches, guaranteed))
+        else:
+            slots = merge(guaranteed + dispatches)
         horizon_end = now + timedelta(hours=horizon_hours)
-        return [s for s in merge(slots)
-                if s.end > now and s.start < horizon_end]
+        return [s for s in slots if s.end > now and s.start < horizon_end]
 
 
 # --------------------------------------------------------------------------
@@ -307,6 +345,8 @@ def main() -> int:
     parser.add_argument("--hours", type=int, default=24)
     parser.add_argument("--raw", action="store_true",
                         help="dump the raw GraphQL payload")
+    parser.add_argument("--bonus-only", action="store_true",
+                        help="only the extra slots outside 23:30-05:30")
     args = parser.parse_args()
 
     try:
@@ -318,7 +358,7 @@ def main() -> int:
             return 0
 
         now = datetime.now(timezone.utc)
-        slots = client.cheap_slots(args.hours, now)
+        slots = client.cheap_slots(args.hours, now, args.bonus_only)
     except (OctopusError, ConfigError) as exc:
         print(f"\nERROR: {exc}", file=sys.stderr)
         return 1
