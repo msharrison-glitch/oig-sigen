@@ -246,14 +246,18 @@ class Handler(BaseHTTPRequestHandler):
         self._reply(202, {"ok": True, "stale_after_s": STALE_AFTER.seconds})
 
 
-def serve(port: int, db_path: Path, admin_token: str | None) -> int:
+def serve(port: int, db_path: Path, admin_token: str | None,
+          bind: str = "127.0.0.1") -> int:
     Handler.db_path = db_path
     Handler.admin_token_hash = hash_token(admin_token) if admin_token else None
     if admin_token is None:
         print("WARNING: no --admin-token, so /v1/sites is closed. "
               "Use --status locally to read state.", file=sys.stderr)
-    httpd = ThreadingHTTPServer(("0.0.0.0", port), Handler)
-    print(f"watchdog listening on :{port}, db {db_path}")
+    # Loopback by default. Exposing a service that holds every site's
+    # health to the whole LAN should be a decision, not an accident; in
+    # production put it behind a TLS terminator and bind 0.0.0.0 explicitly.
+    httpd = ThreadingHTTPServer((bind, port), Handler)
+    print(f"watchdog listening on {bind}:{port}, db {db_path}")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
@@ -268,6 +272,8 @@ def main() -> int:
     ap.add_argument("--serve", action="store_true")
     ap.add_argument("--status", action="store_true")
     ap.add_argument("--port", type=int, default=8080)
+    ap.add_argument("--bind", default="127.0.0.1",
+                    help="interface to listen on (default loopback only)")
     ap.add_argument("--admin-token",
                     default=os.environ.get("WATCHDOG_ADMIN_TOKEN"))
     args = ap.parse_args()
@@ -291,7 +297,7 @@ def main() -> int:
         return 0
 
     if args.serve:
-        return serve(args.port, args.db, args.admin_token)
+        return serve(args.port, args.db, args.admin_token, args.bind)
 
     ap.print_help()
     return 1

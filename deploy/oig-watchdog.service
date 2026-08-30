@@ -1,0 +1,33 @@
+# The off-box watchdog. Install to /etc/systemd/system/oig-watchdog.service
+#
+# This MUST NOT run on the same host as the agent it watches. Its entire
+# purpose is to notice that host dying; co-locating them defeats the point.
+#
+# Bind is loopback by default -- put nginx or Caddy in front for TLS and
+# expose that, rather than binding 0.0.0.0 directly.
+
+[Unit]
+Description=OIG to SigenStor off-box watchdog
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=oigwatch
+Group=oigwatch
+WorkingDirectory=/opt/oig-watchdog
+Environment=WATCHDOG_ADMIN_TOKEN=CHANGE_ME
+ExecStart=/usr/bin/python3 /opt/oig-watchdog/server.py --serve \
+    --port 8080 --bind 127.0.0.1 --db /var/lib/oig-watchdog/watchdog.db
+
+Restart=always
+RestartSec=10
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/oig-watchdog
+
+[Install]
+WantedBy=multi-user.target

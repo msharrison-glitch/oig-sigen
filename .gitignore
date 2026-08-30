@@ -3,3 +3,7 @@
 .octopus-token.json
 __pycache__/
 .DS_Store
+
+# watchdog state and site tokens
+*.db
+.watchdog-*
