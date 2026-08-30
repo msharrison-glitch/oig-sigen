@@ -24,7 +24,7 @@ class ConfigError(RuntimeError):
 # from .env, so a stray shell variable can never silently become config.
 ENV_KEYS = ("OCTOPUS_API_KEY", "OCTOPUS_ACCOUNT_NUMBER", "SIGEN_HOST",
             "IOG_OFF_PEAK_P", "IOG_PEAK_P",
-            "MYENERGI_SERIAL", "MYENERGI_API_KEY")
+            "MYENERGI_SERIAL", "MYENERGI_API_KEY", "MYENERGI_USER_AGENT")
 
 
 def state_path(name: str) -> Path:

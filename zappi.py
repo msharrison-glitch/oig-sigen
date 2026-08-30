@@ -41,6 +41,17 @@ from config import ConfigError, load_env
 
 TIMEOUT = 20.0
 
+# myenergi sits behind Cloudflare, which rejects urllib's default
+# "Python-urllib/3.x" with a 1010 before the request ever reaches them --
+# an anti-scraping rule catching a client they issue API keys for. Identify
+# ourselves properly instead. Override with MYENERGI_USER_AGENT if their
+# rules tighten again.
+DIRECTOR_HOST = "director.myenergi.net"
+
+DEFAULT_USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/126.0.0.0 Safari/537.36")
+
 # Field meanings differ between firmware versions and between community
 # sources, so the parsed view below is best-effort and --raw is authoritative.
 # Reported consistently enough to rely on:
@@ -61,14 +72,20 @@ class ZappiError(RuntimeError):
 
 class ZappiClient:
     def __init__(self, serial: str, api_key: str,
-                 timeout: float = TIMEOUT) -> None:
+                 timeout: float = TIMEOUT,
+                 user_agent: str = DEFAULT_USER_AGENT) -> None:
         self.serial = str(serial).strip()
         self.api_key = api_key
         self.timeout = timeout
+        self.user_agent = user_agent
         if not self.serial:
             raise ZappiError("MYENERGI_SERIAL is empty")
-        # The app picks the server from the LAST DIGIT of the hub serial.
-        self.host = f"s{self.serial[-1]}.myenergi.net"
+        # Start at the director, which answers with X_MYENERGI-asn naming the
+        # server this account actually lives on (s18, s19, ...). Deriving it
+        # from the serial's last digit -- as some community notes suggest --
+        # cannot produce a two-digit name like s18 and yields a 521 from a
+        # host that is not there.
+        self.host = DIRECTOR_HOST
         self._opener = self._build_opener(self.host)
 
     def _build_opener(self, host: str):
@@ -80,15 +97,18 @@ class ZappiClient:
 
     def _get(self, path: str, _redirected: bool = False) -> dict:
         url = f"https://{self.host}{path}"
-        request = urllib.request.Request(
-            url, headers={"Accept": "application/json"})
+        request = urllib.request.Request(url, headers={
+            "Accept": "application/json",
+            "User-Agent": self.user_agent,
+        })
         try:
             with self._opener.open(request, timeout=self.timeout) as response:
                 # myenergi routes accounts to a particular server and says so
                 # in a header rather than an HTTP redirect. Follow it once.
                 asn = response.headers.get("X_MYENERGI-asn")
                 body = response.read()
-                if asn and asn != self.host and not _redirected:
+                if asn and asn != self.host and "myenergi" in asn \
+                        and not _redirected:
                     self.host = asn
                     self._opener = self._build_opener(asn)
                     return self._get(path, _redirected=True)
@@ -140,7 +160,9 @@ def client_from_env() -> ZappiClient:
             "MYENERGI_SERIAL and MYENERGI_API_KEY are not set. Get an API "
             "key from myaccount.myenergi.net -> Advanced -> API key, and use "
             "the HUB serial as the username.")
-    return ZappiClient(serial, key)
+    return ZappiClient(serial, key,
+                       user_agent=env.get("MYENERGI_USER_AGENT")
+                       or DEFAULT_USER_AGENT)
 
 
 def main() -> int:

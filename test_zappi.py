@@ -31,13 +31,23 @@ def stub(client, payload):
 
 
 def main() -> int:
-    print("\nServer comes from the LAST DIGIT of the hub serial")
-    check("serial ...8 -> s8", zappi.ZappiClient("12345678", "k").host,
-          "s8.myenergi.net")
-    check("serial ...1 -> s1", zappi.ZappiClient("20000001", "k").host,
-          "s1.myenergi.net")
-    check("whitespace is stripped",
-          zappi.ZappiClient(" 12345670 ", "k").host, "s0.myenergi.net")
+    print("\nRouting starts at the director, not a guess from the serial")
+    # Deriving s<last digit> cannot produce a two-digit name like s18, and
+    # yields a 521 from a host that is not there. The director answers with
+    # X_MYENERGI-asn naming the real server.
+    check("starts at the director", zappi.ZappiClient("12345678", "k").host,
+          "director.myenergi.net")
+    check("regardless of serial", zappi.ZappiClient("20000001", "k").host,
+          "director.myenergi.net")
+    check("whitespace is stripped from the serial",
+          zappi.ZappiClient(" 12345670 ", "k").serial, "12345670")
+
+    print("\nCloudflare rejects urllib's default identity")
+    check("a real User-Agent is sent",
+          "Mozilla" in zappi.ZappiClient("1", "k").user_agent, True)
+    check("and is overridable",
+          zappi.ZappiClient("1", "k", user_agent="custom/1").user_agent,
+          "custom/1")
     try:
         zappi.ZappiClient("", "k")
         raised = False
