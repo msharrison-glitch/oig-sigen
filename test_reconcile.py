@@ -173,6 +173,63 @@ def main() -> int:
           sorted({x.source for x in fell_back}), ["off-peak"])
 
     # ------------------------------------------------------------ hardware
+    print("\nA planned dispatch is a forecast; the car drawing is proof")
+
+    class FakeZappi:
+        def __init__(self, charging, power=7.0):
+            self.charging, self.power, self.calls = charging, power, 0
+        def status(self):
+            self.calls += 1
+            return {"charging": self.charging, "power_kw": self.power,
+                    "status": "Charging" if self.charging else "Paused",
+                    "plug": "x"}
+
+    class DeadZappi:
+        def status(self):
+            raise reconcile.ZappiError("unreachable")
+
+    live = slot_at(now, -5, 55, "dispatch")
+
+    # Car idle: the slot may never complete, so importing would bill at PEAK.
+    plant_z = make_plant(soc_pct=40.0)
+    rec_z = reconcile.Reconciler(client_for(plant_z), FakeOctopus([live]),
+                                 5.0, 95.0, bonus_only=True,
+                                 zappi=FakeZappi(charging=False, power=0.0))
+    plant_z.writes.clear()
+    check("car not drawing -> do not charge", rec_z.tick(now), "idle")
+    check("and nothing is written", len(plant_z.writes), 0)
+
+    # Car drawing: Octopus has activated the dispatch, so it is really cheap.
+    plant_y = make_plant(soc_pct=40.0)
+    zap = FakeZappi(charging=True)
+    rec_y = reconcile.Reconciler(client_for(plant_y), FakeOctopus([live]),
+                                 5.0, 95.0, bonus_only=True, zappi=zap)
+    check("car drawing -> charge", rec_y.tick(now), "STARTED charging")
+    check("mode 3 latched", plant_y.holding[40031], 3)
+
+    # Once seen, the slot stays confirmed: a car that cycles must not make us
+    # acquire and release every few minutes.
+    zap.charging = False
+    check("a mid-slot pause does not drop the lease",
+          rec_y.tick(now), "holding")
+    check("and the Zappi is not re-queried once confirmed", zap.calls, 1)
+
+    # Unreachable Zappi must fail closed, never open.
+    plant_d = make_plant(soc_pct=40.0)
+    rec_d = reconcile.Reconciler(client_for(plant_d), FakeOctopus([live]),
+                                 5.0, 95.0, bonus_only=True,
+                                 zappi=DeadZappi())
+    plant_d.writes.clear()
+    check("unreachable Zappi -> do not charge", rec_d.tick(now), "idle")
+    check("fails closed, writes nothing", len(plant_d.writes), 0)
+
+    # No Zappi configured at all: unchanged behaviour, acts on the plan.
+    plant_n = make_plant(soc_pct=40.0)
+    rec_n = reconcile.Reconciler(client_for(plant_n), FakeOctopus([live]),
+                                 5.0, 95.0, bonus_only=True)
+    check("no Zappi configured -> old behaviour",
+          rec_n.tick(now), "STARTED charging")
+
     print("\nBonus-only refuses to guess when Octopus is down")
     rec_b = reconciler(make_plant(), BrokenOctopus(), )
     rec_b.bonus_only = True

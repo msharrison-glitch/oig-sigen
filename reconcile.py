@@ -65,6 +65,7 @@ from config import ConfigError, load_env, resolve_host
 from octopus import (LOCAL_TZ, OctopusClient, OctopusError, Slot,
                      merge, off_peak_windows)
 from sigen import ModbusError, SigenClient
+from zappi import ZappiClient, ZappiError
 
 log = logging.getLogger("reconcile")
 
@@ -277,10 +278,18 @@ class Reconciler:
                  charge_kw: float, target_soc: float,
                  dry_run: bool = False, heartbeat_url: str | None = None,
                  site_token: str | None = None,
-                 bonus_only: bool = False) -> None:
+                 bonus_only: bool = False,
+                 zappi: "ZappiClient | None" = None) -> None:
         self.heartbeat_url = heartbeat_url
         self.site_token = site_token
         self.bonus_only = bonus_only
+        self.zappi = zappi
+        # Slots whose dispatch we have SEEN activate, by start time. Once the
+        # car has drawn during a slot, Octopus has activated it and the whole
+        # window bills off-peak -- so we keep charging for the rest of it even
+        # if the car pauses. Without that, a car that cycles would have us
+        # acquiring and releasing every few minutes at 20-30 s a time.
+        self._confirmed: set[str] = set()
         self._slots: list[Slot] = []
         self._known: set[tuple[str, str, str]] | None = None
         self.client = client
@@ -412,6 +421,26 @@ class Reconciler:
             target = None
             reason = " (battery at target)"
 
+        # A planned dispatch is a forecast about the CAR, not a price
+        # guarantee. If the car never draws, the dispatch never completes and
+        # the period bills at PEAK -- so importing on the plan alone can buy
+        # expensive electricity. Requiring the Zappi to be drawing turns the
+        # forecast into an observation.
+        if target is not None and self.zappi is not None:
+            key = target.start.isoformat()
+            if key not in self._confirmed:
+                if self._zappi_drawing():
+                    self._confirmed.add(key)
+                    log.info("DISPATCH ACTIVE: the car is drawing, so this "
+                             "slot is really off-peak -- proceeding")
+                else:
+                    log.info("waiting: slot %s is planned but the car is not "
+                             "drawing, so it may never complete and would "
+                             "bill at peak",
+                             target.local()[0].strftime("%H:%M"))
+                    target = None
+                    reason = " (dispatch unconfirmed)"
+
         self._holding_dispatch = bool(
             target is not None and "dispatch" in target.source)
 
@@ -438,6 +467,28 @@ class Reconciler:
                  action, reason)
         self.send_heartbeat(state, action)
         return action
+
+    def _zappi_drawing(self) -> bool:
+        """Is the car actually taking charge right now?
+
+        Fails closed: an unreachable Zappi means we do NOT know the dispatch
+        activated, and guessing wrong costs peak rate.
+        """
+        if self.zappi is None:
+            return False
+        try:
+            state = self.zappi.status()
+        except (ZappiError, OSError) as exc:
+            log.warning("Zappi unreachable (%s) -- treating the dispatch as "
+                        "unconfirmed", exc)
+            return False
+        if state is None:
+            log.warning("no Zappi on the account -- dispatch unconfirmed")
+            return False
+        drawing = bool(state["charging"]) or (state["power_kw"] or 0) > 0.2
+        log.info("Zappi: %s, %s, %.2f kW", state["status"], state["plug"],
+                 state["power_kw"] or 0.0)
+        return drawing
 
     def send_heartbeat(self, state: PlantState, action: str) -> bool:
         """Tell the off-box watchdog what we just saw. Never raises.
@@ -588,6 +639,11 @@ def main() -> int:
                         help="log decisions but write no registers")
     parser.add_argument("--no-octopus", action="store_true",
                         help="ignore bonus slots; guaranteed window only")
+    parser.add_argument("--require-zappi", action="store_true",
+                        help="only charge once the Zappi is actually drawing, "
+                             "proving Octopus activated the dispatch. Without "
+                             "this the agent acts on a forecast that may "
+                             "never complete, and would bill at peak")
     parser.add_argument("--bonus-only", action="store_true",
                         help="command ONLY the extra slots outside "
                              "23:30-05:30. Recommended on a plant running "
@@ -619,6 +675,10 @@ def main() -> int:
 
     try:
         host = resolve_host(args.host)
+        zappi_client = None
+        if args.require_zappi:
+            import zappi as _z
+            zappi_client = _z.client_from_env()
         octopus = None
         if not args.no_octopus:
             env = load_env()
@@ -634,7 +694,8 @@ def main() -> int:
                              dry_run=args.dry_run,
                              heartbeat_url=args.heartbeat_url,
                              site_token=args.site_token,
-                             bonus_only=args.bonus_only)
+                             bonus_only=args.bonus_only,
+                             zappi=zappi_client)
 
             def on_signal(signum, _frame):
                 log.info("caught signal %d", signum)
