@@ -53,13 +53,14 @@ class FakeOctopus:
         self.slots = slots
         self.calls = 0
 
-    def cheap_slots(self, hours, now):
+    def cheap_slots(self, hours, now, bonus_only=False):
         self.calls += 1
+        self.last_bonus_only = bonus_only
         return list(self.slots)
 
 
 class BrokenOctopus:
-    def cheap_slots(self, hours, now):
+    def cheap_slots(self, hours, now, bonus_only=False):
         raise OctopusError("simulated API outage")
 
 
@@ -145,6 +146,21 @@ def main() -> int:
           sorted({x.source for x in fell_back}), ["off-peak"])
 
     # ------------------------------------------------------------ hardware
+    print("\nBonus-only refuses to guess when Octopus is down")
+    rec_b = reconciler(make_plant(), BrokenOctopus(), )
+    rec_b.bonus_only = True
+    check("no bonus slots can be confirmed -> command nothing",
+          rec_b.fetch_slots(now), [])
+    rec_n = reconcile.Reconciler(client_for(make_plant()), None, 5.0, 95.0,
+                                 bonus_only=True)
+    check("and with no client at all, likewise",
+          rec_n.fetch_slots(now), [])
+    rec_p = reconciler(make_plant(), FakeOctopus([]))
+    rec_p.bonus_only = True
+    rec_p.fetch_slots(now)
+    check("the flag is passed through to the client",
+          rec_p.octopus.last_bonus_only, True)
+
     print("\nCold start inside a cheap slot")
     plant = make_plant(soc_pct=50.0)
     live = slot_at(now, -5, 55)
