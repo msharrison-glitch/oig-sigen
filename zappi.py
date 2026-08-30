@@ -13,10 +13,17 @@ Cloud API, Digest auth (MD5, qop=auth). Base URL is s<last digit of hub
 serial>.myenergi.net; the server may redirect via the X_MYENERGI-asn header,
 which is handled. Stdlib only.
 
-Credentials, from myaccount.myenergi.net -> Advanced -> API key:
+Credentials. Two routes, and the digest exchange cannot tell them apart:
 
-    MYENERGI_SERIAL=12345678         # hub serial, used as the username
-    MYENERGI_API_KEY=...             # API key, used as the password
+  1. API key: myaccount.myenergi.net -> Products -> the Gateway Device row at
+     the top -> "Advanced" (key icon) -> Generate new API key. Only the
+     account that REGISTERED the devices has that button; if an installer set
+     the system up, it is on their account, not yours.
+  2. App password: set one in the myenergi app and use that instead. Older
+     method, still works, and avoids the account-ownership problem entirely.
+
+    MYENERGI_SERIAL=12345678         # HUB serial, used as the username
+    MYENERGI_API_KEY=...             # API key OR app password
 
     python3 zappi.py                 # current state
     python3 zappi.py --raw           # the whole payload
@@ -90,8 +97,10 @@ class ZappiClient:
             if exc.code == 401:
                 raise ZappiError(
                     "myenergi rejected the credentials. Username is the HUB "
-                    "serial (not the Zappi's), password is the API key from "
-                    "myaccount.myenergi.net -> Advanced.")
+                    "serial, not the Zappi's. The password is either an API "
+                    "key (myaccount -> Products -> Gateway row -> Advanced, "
+                    "only on the account that registered the devices) or the "
+                    "app password set in the myenergi app -- either works.")
             raise ZappiError(f"HTTP {exc.code} from myenergi: "
                              f"{exc.read()[:200]!r}")
         except urllib.error.URLError as exc:
