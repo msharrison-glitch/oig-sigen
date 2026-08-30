@@ -7,3 +7,7 @@ __pycache__/
 # watchdog state and site tokens
 *.db
 .watchdog-*
+
+# observer output
+overnight*.csv
+watch.log
