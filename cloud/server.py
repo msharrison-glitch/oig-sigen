@@ -191,7 +191,7 @@ SEVERITY_COLOUR = {
     "CRITICAL": "#b3261e",
     "WARN": "#8a6100",
     "UNKNOWN": "#5f6368",
-    "OK": "#1e6b३4".replace("३", "3"),
+    "OK": "#1e6b34",
 }
 
 

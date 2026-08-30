@@ -174,6 +174,32 @@ def main() -> int:
           rec_none.send_heartbeat(
               reconcile.PlantState(0, 0, 50.0, None), "idle"), False)
 
+    print("\nBrowser dashboard")
+    import base64 as _b64
+    def dash(user_pass):
+        req = urllib.request.Request(base + "/")
+        if user_pass:
+            req.add_header("Authorization", "Basic " + _b64.b64encode(
+                user_pass.encode()).decode())
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status, r.read().decode()
+        except urllib.error.HTTPError as e:
+            return e.code, (e.headers.get("WWW-Authenticate") or "")
+
+    code, detail = dash(None)
+    check("dashboard is closed without credentials", code, 401)
+    check("and asks the browser for them", "Basic" in detail, True)
+    check("wrong password stays closed", dash("x:nope")[0], 401)
+    code, body = dash(f"admin:{admin}")
+    check("opens with the admin token as password", code, 200)
+    check("lists the site", "home" in body, True)
+    check("shows a severity", "CRITICAL" in body or "OK" in body
+          or "WARN" in body, True)
+    check("is self-contained (no external scripts)",
+          "<script" not in body and "http://" not in body.replace(base, ""),
+          True)
+
     httpd.shutdown()
     print("\n" + "=" * 72)
     if failures:
