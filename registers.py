@@ -83,6 +83,40 @@ ESS_MAX_DISCHARGE_LIMIT = Register(
     note="Applies only in modes 3-6.",
 )
 
+# --- ESS SOC limits (40046-40048) ---------------------------------------
+#
+# Confirmed RW in protocol V2.7 and exposed by the community integration as
+# charge cut-off / discharge cut-off / backup reserve SOC. We READ them and do
+# not write them, for one specific reason: the community names them in the
+# order below, but this plant reads 40046 = 0 and 40047 = 100.0 %, and that
+# combination is documented elsewhere as "battery frozen" -- which it plainly
+# is not, since it was discharging at 11.8 kW at the time. Either the ordering
+# is the reverse of what is written below, or the semantics differ.
+#
+# 0 % and 100.0 % are exactly what "no restriction in either direction" looks
+# like if the labels are swapped, which is the likelier reading. Until that is
+# settled against the mySigen app, writing these could silently stop the
+# battery. Verify before you write. See the limits lesson above.
+
+ESS_CHARGE_CUTOFF_SOC = Register(
+    40046, "ESS charge cut-off SOC (ordering UNVERIFIED)", "u16", True,
+    gain=10, unit="%",
+    note="Do not write until the 40046/40047 ordering is confirmed.",
+)
+
+ESS_DISCHARGE_CUTOFF_SOC = Register(
+    40047, "ESS discharge cut-off SOC (ordering UNVERIFIED)", "u16", True,
+    gain=10, unit="%",
+    note="Do not write until the 40046/40047 ordering is confirmed.",
+)
+
+ESS_BACKUP_SOC = Register(
+    40048, "ESS backup reserve SOC", "u16", True, gain=10, unit="%",
+    note="Applies while grid-connected; the discharge cut-off takes over "
+         "during an outage.",
+)
+
+
 GRID_MAX_EXPORT_LIMIT = Register(
     40038, "Grid point max export limitation", "u32", True,
     gain=1000, unit="kW",
@@ -161,6 +195,9 @@ PROBE_SET: list[Register] = [
     ESS_MAX_DISCHARGE_LIMIT,
     GRID_MAX_EXPORT_LIMIT,
     ACTIVE_POWER_TARGET,
+    ESS_CHARGE_CUTOFF_SOC,
+    ESS_DISCHARGE_CUTOFF_SOC,
+    ESS_BACKUP_SOC,
 ]
 
 # The compact set used for live monitoring during a control lease.
