@@ -1,0 +1,46 @@
+# Agent and watchdog. Deliberately shown together, but read the warning:
+# they are NOT meant to run on the same machine in earnest.
+
+services:
+  agent:
+    image: oig-sigen:latest
+    build: .
+    container_name: oig-agent
+    restart: unless-stopped
+    environment:
+      TZ: Europe/London
+      SIGEN_HOST: "192.168.2.53"
+      OCTOPUS_API_KEY: "${OCTOPUS_API_KEY:?set this in a .env beside the compose file}"
+      OCTOPUS_ACCOUNT_NUMBER: "${OCTOPUS_ACCOUNT_NUMBER:?required}"
+    volumes:
+      # Not optional. The lease file is the safety record; losing it on
+      # restart means the deadman has nothing to act on.
+      - oig-state:/state
+    command: ["--kw", "5", "--bonus-only",
+              "--heartbeat-url", "http://watchdog:8080/v1/heartbeat",
+              "--site-token", "${SITE_TOKEN:-}"]
+    # Bridge networking is enough: it needs the plant on the LAN and
+    # api.octopus.energy. No host networking, no privileges.
+
+  # WARNING: co-located here only so the compose file is runnable as a demo.
+  # The watchdog exists to notice THIS HOST dying. On this host it cannot.
+  # In earnest, run it on a VPS or a separate box and point the agent at it.
+  watchdog:
+    image: oig-sigen:latest
+    build: .
+    container_name: oig-watchdog
+    restart: unless-stopped
+    entrypoint: ["python3", "/app/cloud/server.py"]
+    command: ["--serve", "--port", "8080", "--bind", "0.0.0.0",
+              "--db", "/state/watchdog.db"]
+    environment:
+      TZ: Europe/London
+      WATCHDOG_ADMIN_TOKEN: "${WATCHDOG_ADMIN_TOKEN:?required}"
+    volumes:
+      - watchdog-state:/state
+    ports:
+      - "127.0.0.1:8787:8080"
+
+volumes:
+  oig-state:
+  watchdog-state:

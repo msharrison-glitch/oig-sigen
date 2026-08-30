@@ -41,10 +41,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import registers as R
-from config import ConfigError, resolve_host
+from config import ConfigError, resolve_host, state_path
 from sigen import PLANT_UNIT_ID, ModbusError, SigenClient
 
-STATE_FILE = Path(__file__).with_name(".lease.json")
+STATE_FILE = state_path(".lease.json")
 
 # Hard ceiling on any single lease, regardless of what's asked for.
 MAX_LEASE_MINUTES = 120

@@ -35,7 +35,7 @@ from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from config import ConfigError, load_env
+from config import ConfigError, load_env, state_path
 
 # Trailing slash matters. Octopus runs Django with APPEND_SLASH, so the
 # slashless form 301s -- and urllib follows redirects by turning POST into
@@ -48,7 +48,7 @@ LOCAL_TZ = ZoneInfo("Europe/London")
 OFF_PEAK_START = time(23, 30)
 OFF_PEAK_END = time(5, 30)
 
-TOKEN_CACHE = Path(__file__).with_name(".octopus-token.json")
+TOKEN_CACHE = state_path(".octopus-token.json")
 
 # Kraken tokens last about an hour; refresh well before that.
 TOKEN_TTL = timedelta(minutes=50)
