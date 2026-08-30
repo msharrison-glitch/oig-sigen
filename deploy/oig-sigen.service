@@ -20,7 +20,10 @@ Type=simple
 User=oig
 Group=oig
 WorkingDirectory=/opt/oig-sigen
-ExecStart=/usr/bin/python3 /opt/oig-sigen/reconcile.py --kw 5
+# --bonus-only is not optional on a plant running Sigen AI. Without it the
+# agent commands 23:30-05:30 as well, suspending a working optimiser to
+# duplicate it. The whole point is the bonus slots it cannot see.
+ExecStart=/usr/bin/python3 /opt/oig-sigen/reconcile.py --kw 5 --bonus-only
 
 # SIGTERM is wired to the release path. Give it room: a release is 5-15 s,
 # and with_retry may take another second or two on a flaky link.
