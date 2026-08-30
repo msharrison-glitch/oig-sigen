@@ -111,21 +111,34 @@ class Lease:
         self.client = client
         self.log = log
         self.original_mode: int | None = None
+        self.original_limits: dict[int, int] = {}
         self.held = False
         self._released = False
 
     def snapshot(self) -> dict:
+        # The limits are captured raw, because they MUST be given back. A
+        # limit left behind is honoured even with Remote EMS disabled -- a
+        # 3 kW discharge limit from a test capped this plant's export at
+        # 3 kW for days. Verified 2026-08-30: 40029=0, 40034=3 kW,
+        # ESS power pinned at -3.00 kW.
         return {
             "remote_ems_enable": self.client.read_u16(
                 R.REMOTE_EMS_ENABLE.address),
             "remote_ems_mode": self.client.read_u16(
                 R.REMOTE_EMS_MODE.address),
+            "limits": {
+                R.ESS_MAX_CHARGE_LIMIT.address: self.client.read_u32(
+                    R.ESS_MAX_CHARGE_LIMIT.address),
+                R.ESS_MAX_DISCHARGE_LIMIT.address: self.client.read_u32(
+                    R.ESS_MAX_DISCHARGE_LIMIT.address),
+            },
         }
 
     def acquire(self, mode: int, power_kw: float | None,
                 minutes: int) -> None:
         before = self.snapshot()
         self.original_mode = before["remote_ems_mode"]
+        self.original_limits = before["limits"]
 
         if before["remote_ems_enable"] == 1:
             self.log("  ! Remote EMS was ALREADY enabled before we started.")
@@ -143,6 +156,8 @@ class Lease:
             "acquired_at": datetime.now(timezone.utc).isoformat(),
             "expires_at": deadline.isoformat(),
             "original_mode": self.original_mode,
+            "original_limits": {str(k): v
+                                for k, v in self.original_limits.items()},
             "pid": os.getpid(),
         })
 
@@ -201,6 +216,11 @@ class Lease:
                 self.client.write_u16(
                     R.REMOTE_EMS_MODE.address, self.original_mode)
                 self.log(f"  restored 40031 mode = {self.original_mode}")
+            # Limits last: 40029 = 0 is the safety-critical write and has
+            # already happened, so a failure here cannot leave the plant
+            # under our control -- only with a limit still applied, which the
+            # deadman and a later `release` will also try to undo.
+            restore_limits(self.client, self.original_limits, self.log)
         except (ModbusError, OSError) as exc:
             self.log(f"\n  *** RELEASE FAILED: {exc}")
             self.log("  *** The plant may still be under Remote EMS control.")
@@ -210,6 +230,25 @@ class Lease:
         else:
             clear_state()
             self.log("  released cleanly.")
+
+
+def restore_limits(client: SigenClient, limits: dict, log=print) -> None:
+    """Give back the ESS power limits.
+
+    Not cosmetic. A limit written during a lease stays in force after
+    release, with Remote EMS disabled, and silently caps the plant's own EMS.
+    """
+    for address, raw in (limits or {}).items():
+        address = int(address)
+        try:
+            if client.read_u32(address) == int(raw):
+                continue
+            client.write_u32(address, int(raw))
+            shown = "unset" if int(raw) == R.U32_UNSET else \
+                f"{int(raw) / 1000:.2f} kW"
+            log(f"  restored {address} limit = {shown}")
+        except (ModbusError, OSError) as exc:
+            log(f"  ! could not restore limit {address}: {exc}")
 
 
 # --------------------------------------------------------------------------
@@ -352,8 +391,28 @@ def cmd_release(client: SigenClient) -> int:
     if state and state.get("original_mode") is not None:
         client.write_u16(R.REMOTE_EMS_MODE.address, state["original_mode"])
         print(f"  restored 40031 mode = {state['original_mode']}")
+    if state and state.get("original_limits"):
+        restore_limits(client, state["original_limits"])
     clear_state()
     print("  released.")
+    return 0
+
+
+def cmd_clear_limits(client: SigenClient) -> int:
+    """Return both ESS power limits to 'never configured'.
+
+    Remediation for a limit left behind by an earlier lease. Safe at any
+    time: it removes a cap, it never imposes one.
+    """
+    for reg in (R.ESS_MAX_CHARGE_LIMIT, R.ESS_MAX_DISCHARGE_LIMIT):
+        current = R.read(client, reg)
+        if current is None:
+            print(f"  {reg.address} {reg.name}: already unset")
+            continue
+        print(f"  {reg.address} {reg.name}: {current:.2f} kW -> unset")
+        client.write_u32(reg.address, R.U32_UNSET)
+        after = R.read(client, reg)
+        print(f"    readback: {'unset' if after is None else f'{after:.2f} kW'}")
     return 0
 
 
@@ -382,6 +441,7 @@ def main() -> int:
 
     sub.add_parser("status")
     sub.add_parser("release")
+    sub.add_parser("clear-limits")
 
     p_standby = sub.add_parser("standby")
     p_standby.add_argument("--minutes", type=int, default=2)
@@ -408,6 +468,8 @@ def main() -> int:
                 return cmd_status(c)
             if args.command == "release":
                 return cmd_release(c)
+            if args.command == "clear-limits":
+                return cmd_clear_limits(c)
             if args.command == "standby":
                 return cmd_hold(c, R.EMS_STANDBY, None,
                                 args.minutes, args.yes)

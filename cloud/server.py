@@ -24,12 +24,14 @@ deployable anywhere including the same UTM VM as the agent.
 API:
     POST /v1/heartbeat   Authorization: Bearer <site token>
     GET  /v1/sites       Authorization: Bearer <admin token>
+    GET  /              browser dashboard, HTTP Basic (password = admin token)
     GET  /healthz
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -38,6 +40,7 @@ import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from html import escape
 from pathlib import Path
 
 DB_PATH = Path(__file__).with_name("watchdog.db")
@@ -184,6 +187,60 @@ def evaluate(db: sqlite3.Connection, now: datetime | None = None) -> list[dict]:
 # HTTP
 # --------------------------------------------------------------------------
 
+SEVERITY_COLOUR = {
+    "CRITICAL": "#b3261e",
+    "WARN": "#8a6100",
+    "UNKNOWN": "#5f6368",
+    "OK": "#1e6b३4".replace("३", "3"),
+}
+
+
+def render_dashboard(rows: list[dict]) -> bytes:
+    """A page you can leave open on a phone. No JS, no CDN, no build step --
+    it has to work from a loopback port over an SSH tunnel at 2am."""
+    cells = []
+    for row in rows:
+        colour = SEVERITY_COLOUR.get(row["severity"], "#5f6368")
+        soc = row.get("soc")
+        soc_text = f"{soc:.1f}%" if isinstance(soc, (int, float)) else "&mdash;"
+        cells.append(
+            f'<tr><td><span class="pill" style="background:{colour}">'
+            f'{escape(row["severity"])}</span></td>'
+            f'<td class="name">{escape(row["site"])}</td>'
+            f'<td class="soc">{soc_text}</td>'
+            f'<td class="detail">{escape(row["detail"])}</td></tr>'
+        )
+    worst = "CRITICAL" if any(r["severity"] == "CRITICAL" for r in rows) else (
+        "WARN" if any(r["severity"] in ("WARN", "UNKNOWN") for r in rows)
+        else "OK")
+    return f"""<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="30">
+<title>{worst} &middot; OIG watchdog</title>
+<style>
+:root {{ color-scheme: light dark; }}
+body {{ font: 15px/1.5 -apple-system, system-ui, sans-serif; margin: 0;
+        padding: 1.5rem; }}
+h1 {{ font-size: 1.1rem; margin: 0 0 .25rem; }}
+p.sub {{ margin: 0 0 1.25rem; opacity: .65; font-size: .85rem; }}
+table {{ border-collapse: collapse; width: 100%; max-width: 900px; }}
+td, th {{ padding: .55rem .6rem; text-align: left;
+          border-bottom: 1px solid rgba(128,128,128,.25); }}
+th {{ font-size: .75rem; text-transform: uppercase; opacity: .6; }}
+.pill {{ color: #fff; padding: .15rem .5rem; border-radius: 999px;
+         font-size: .72rem; font-weight: 600; letter-spacing: .02em; }}
+.name {{ font-weight: 600; }}
+.soc {{ font-variant-numeric: tabular-nums; }}
+.detail {{ opacity: .8; font-size: .88rem; }}
+</style></head><body>
+<h1>OIG &rarr; SigenStor watchdog</h1>
+<p class="sub">{len(rows)} site(s) &middot; refreshes every 30s &middot;
+observes only, cannot command</p>
+<table><tr><th>State</th><th>Site</th><th>SOC</th><th>Detail</th></tr>
+{"".join(cells) or '<tr><td colspan="4">no sites registered</td></tr>'}
+</table></body></html>""".encode()
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "oig-watchdog/1.0"
     db_path = DB_PATH
@@ -200,6 +257,20 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(raw)
 
+    def _basic_ok(self) -> bool:
+        """Browsers cannot send a bearer token from an address bar, so the
+        dashboard uses Basic auth: any username, password = admin token."""
+        header = self.headers.get("Authorization", "")
+        if not header.startswith("Basic ") or self.admin_token_hash is None:
+            return False
+        try:
+            decoded = base64.b64decode(header[6:].strip()).decode()
+        except Exception:
+            return False
+        _, _, password = decoded.partition(":")
+        return secrets.compare_digest(hash_token(password),
+                                      self.admin_token_hash)
+
     def _bearer(self) -> str | None:
         header = self.headers.get("Authorization", "")
         return header[7:].strip() if header.startswith("Bearer ") else None
@@ -207,6 +278,25 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path == "/healthz":
             return self._reply(200, {"ok": True})
+        if self.path in ("/", "/index.html"):
+            if not self._basic_ok():
+                self.send_response(401)
+                self.send_header("WWW-Authenticate",
+                                 'Basic realm="oig-watchdog"')
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            db = connect(self.db_path)
+            try:
+                page = render_dashboard(evaluate(db))
+            finally:
+                db.close()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(page)))
+            self.end_headers()
+            self.wfile.write(page)
+            return
         if self.path == "/v1/sites":
             token = self._bearer()
             if not token or self.admin_token_hash is None or \
