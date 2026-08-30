@@ -299,26 +299,41 @@ def main() -> int:
     check("and a withdrawn one disappears again", len(rec_c._slots), 0)
     check("three ticks, three calls -- not six", oct_c.calls, 3)
 
-    print("\nBonus-only polls harder, because that is where the value is")
+    print("\nPolling sits on the half-hour grid, at :25 and :55")
+    at = lambda h, m: datetime(2026, 1, 15, h, m, tzinfo=timezone.utc)
+    check("just after the hour -> :25", reconcile.next_poll(at(21, 0)),
+          at(21, 25))
+    check("just after :25 -> :55", reconcile.next_poll(at(21, 26)),
+          at(21, 55))
+    check("just after :55 -> next hour's :25",
+          reconcile.next_poll(at(21, 56)), at(22, 25))
+    check("rolls over midnight", reconcile.next_poll(at(23, 59)),
+          datetime(2026, 1, 16, 0, 25, tzinfo=timezone.utc))
+    check("never more than 30 min away",
+          max((reconcile.next_poll(at(21, m)) - at(21, m)).total_seconds()
+              for m in range(60)) <= 1800, True)
+
     rec_c._holding_dispatch = False
-    check("bonus-only cadence", rec_c.sleep_seconds(now, []),
-          reconcile.BONUS_POLL_INTERVAL)
-    rec_d = reconciler(make_plant(), FakeOctopus([]))
-    check("normal cadence is slower", rec_d.sleep_seconds(now, []),
-          reconcile.POLL_INTERVAL)
-    check("bonus cadence is not slower than the normal one",
-          reconcile.BONUS_POLL_INTERVAL <= reconcile.POLL_INTERVAL, True)
+    idle_wait = rec_c.sleep_seconds(at(21, 26), [])
+    check("idle waits for the grid, not a free-running timer",
+          round(idle_wait), 1741)
+    rec_c._holding_dispatch = True
+    held_wait = rec_c.sleep_seconds(at(21, 26), [])
+    check("but holding a bonus slot still checks sooner",
+          held_wait <= reconcile.DISPATCH_POLL_INTERVAL + 1, True)
 
     print("\nSleeping only until the decision could change")
     rec = reconciler(make_plant(), FakeOctopus([]))
-    check("no events -> the poll interval caps it",
-          rec.sleep_seconds(now, []), reconcile.POLL_INTERVAL)
+    check("no events -> waits for the next grid poll (:25 from 22:00)",
+          rec.sleep_seconds(now, []),
+          (reconcile.next_poll(now) - now).total_seconds() + 1.0)
     soon = slot_at(now, 3, 60)
     check("an imminent boundary shortens the sleep",
           round(rec.sleep_seconds(now, [soon])), 121)
     rec._holding_dispatch = True
-    check("holding a bonus slot polls harder",
-          rec.sleep_seconds(now, []), reconcile.DISPATCH_POLL_INTERVAL)
+    check("holding a bonus slot polls harder (+1s wake slack)",
+          rec.sleep_seconds(now, []),
+          reconcile.DISPATCH_POLL_INTERVAL + 1.0)
 
     print("\n" + "=" * 72)
     if failures:

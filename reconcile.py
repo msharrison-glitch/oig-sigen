@@ -71,10 +71,12 @@ POLL_INTERVAL = 300.0
 # short notice, and every minute we are slow to notice is imported at peak.
 DISPATCH_POLL_INTERVAL = 120.0
 
-# In bonus-only mode the whole value is short-notice slots, and the schedule
-# is known to churn overnight -- slots appear, move and are withdrawn. Poll at
-# this rate throughout, not just while holding one.
-BONUS_POLL_INTERVAL = 120.0
+# Dispatch data is half-hourly, so poll on that grid rather than on a free-
+# running timer: at :25 and :55, five minutes before each boundary. That is a
+# confirmation poll before anything can start, at 48 calls a day instead of
+# 720 -- which matters for a tool other people will run against Octopus too.
+# Event wakes still fire independently, so punctuality does not depend on it.
+POLL_MINUTES = (25, 55)
 
 # Actuation is 18-31 s, so lead the opening boundary comfortably.
 COMMAND_LEAD = 60.0
@@ -144,6 +146,18 @@ def desired_slot(slots: list[Slot], now: datetime) -> Slot | None:
         if begin <= now < finish:
             return slot
     return None
+
+
+def next_poll(now: datetime,
+              minutes: tuple[int, ...] = POLL_MINUTES) -> datetime:
+    """The next scheduled poll on the half-hour grid."""
+    candidates = []
+    for base in (now, now + timedelta(hours=1)):
+        for minute in minutes:
+            stamp = base.replace(minute=minute, second=0, microsecond=0)
+            if stamp > now:
+                candidates.append(stamp)
+    return min(candidates)
 
 
 def upcoming(slots: list[Slot], now: datetime) -> list[Slot]:
@@ -435,18 +449,18 @@ class Reconciler:
             return False
 
     def sleep_seconds(self, now: datetime, slots: list[Slot]) -> float:
+        # Base cadence is the half-hour grid. The exception is actively
+        # holding a bonus slot: a withdrawal mid-charge costs real money, so
+        # that case keeps its own faster check.
+        wake = next_poll(now)
         if self._holding_dispatch:
-            cap = DISPATCH_POLL_INTERVAL
-        elif self.bonus_only:
-            cap = BONUS_POLL_INTERVAL
-        else:
-            cap = POLL_INTERVAL
+            wake = min(wake, now + timedelta(seconds=DISPATCH_POLL_INTERVAL))
         event = next_event(slots, now)
-        if event is None:
-            return cap
+        if event is not None:
+            wake = min(wake, event)
         # A second of slack, so we wake just after the boundary rather than
         # a hair before it and have to go round again.
-        return max(1.0, min(cap, (event - now).total_seconds() + 1.0))
+        return max(1.0, (wake - now).total_seconds() + 1.0)
 
     def run(self) -> int:
         log.info("reconciler started (charge %.2f kW, target SOC %.1f%%, "
