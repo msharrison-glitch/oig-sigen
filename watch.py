@@ -35,9 +35,25 @@ from config import ConfigError, load_env, resolve_host
 from octopus import LOCAL_TZ, OctopusClient, OctopusError, Slot, off_peak_windows, merge
 from sigen import ModbusError, SigenClient
 
-# IOG rates, pence per kWh. From CLAUDE.md; adjust if your tariff moves.
-OFF_PEAK_P = 4.49
-PEAK_P = 29.757
+# IOG rates in pence per kWh. These vary by DNO region, so they come from
+# .env rather than being baked in -- anyone else running this has different
+# numbers, and a summary quoting the wrong ones is worse than no summary.
+DEFAULT_OFF_PEAK_P = 4.49
+DEFAULT_PEAK_P = 29.757
+
+
+def tariff_rates() -> tuple[float, float]:
+    try:
+        env = load_env()
+    except ConfigError:
+        return DEFAULT_OFF_PEAK_P, DEFAULT_PEAK_P
+    def rate(key, default):
+        try:
+            return float(env.get(key, "") or default)
+        except ValueError:
+            return default
+    return (rate("IOG_OFF_PEAK_P", DEFAULT_OFF_PEAK_P),
+            rate("IOG_PEAK_P", DEFAULT_PEAK_P))
 
 FIELDS = ["utc", "local", "cheap", "soc_pct", "ess_kw", "grid_kw", "pv_kw",
           "ems_enable", "ems_mode", "charge_limit_kw", "discharge_limit_kw",
@@ -206,9 +222,10 @@ def summarise(path: Path) -> int:
           f"{imported[0]:6.2f} kWh other")
     print(f"  grid exported      {exported[1]:6.2f} kWh cheap   "
           f"{exported[0]:6.2f} kWh other")
-    cost = (imported[1] * OFF_PEAK_P + imported[0] * PEAK_P) / 100
+    off_peak_p, peak_p = tariff_rates()
+    cost = (imported[1] * off_peak_p + imported[0] * peak_p) / 100
     print(f"  import cost        £{cost:.2f} "
-          f"(at {OFF_PEAK_P}p / {PEAK_P}p)")
+          f"(at {off_peak_p}p / {peak_p}p)")
     print("=" * 68)
 
     # The question this whole run exists to answer.
