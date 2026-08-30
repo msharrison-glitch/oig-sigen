@@ -534,14 +534,24 @@ class Reconciler:
         in, look now" without waiting for :25 or :55.
         """
         global _refresh
-        remaining = seconds
-        while remaining > 0 and not _stop_requested():
+        # Against the WALL CLOCK, not a countdown. If the host suspends -- a
+        # closed laptop lid does exactly this -- the process freezes mid-sleep
+        # and a countdown resumes as though no time passed, leaving the agent
+        # hours behind the schedule it is meant to be reconciling. Comparing
+        # to the clock means a suspend is noticed the instant we wake.
+        deadline = utcnow() + timedelta(seconds=seconds)
+        while not _stop_requested():
+            now = utcnow()
+            if now >= deadline:
+                return
             if _refresh:
                 _refresh = False
                 log.info("SIGHUP -- re-polling now")
                 return
-            time.sleep(min(SLEEP_CHUNK, remaining))
-            remaining -= SLEEP_CHUNK
+            time.sleep(min(SLEEP_CHUNK,
+                           (deadline - now).total_seconds()))
+        # A suspend long enough to overshoot the deadline lands here with the
+        # next tick due immediately, which is what we want.
 
     def sleep_seconds(self, now: datetime, slots: list[Slot]) -> float:
         # Base cadence is the half-hour grid. The exception is actively
@@ -574,7 +584,14 @@ class Reconciler:
                 slots = []
             delay = self.sleep_seconds(utcnow(), slots)
             log.debug("sleeping %.0fs", delay)
+            before = utcnow()
             self._sleep(delay)
+            overshoot = (utcnow() - before).total_seconds() - delay
+            if overshoot > 60:
+                log.warning("woke %.0fs later than intended -- the host was "
+                            "probably suspended. Anything held would NOT have "
+                            "been renewed or released while it slept.",
+                            overshoot)
 
     def safe_release(self) -> None:
         """Release, swallowing failures. Called from the error path and from
