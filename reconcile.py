@@ -1,0 +1,456 @@
+#!/usr/bin/env python3
+"""
+Keep the SigenStor charging exactly when Octopus import is cheap.
+
+Every tick this recomputes the desired schedule from octopus.cheap_slots(),
+compares it to what the plant is actually doing, and writes only when the two
+disagree. It is a reconciliation loop, not a scheduler: there is no queue of
+pending actions to get out of step with reality, so a plant that changes
+underneath us -- someone poking the app, a restart, a withdrawn dispatch
+slot -- is corrected on the next pass rather than silently ignored.
+
+Three constraints shape the whole design:
+
+  * **No watchdog.** A latched charge command outlives the process that set
+    it, straight into the peak rate. So this holds a control.Lease, and the
+    lease is *short and rolled forward* -- LEASE_TTL_MINUTES, renewed every
+    tick -- rather than taken out for the length of the slot. A loop that
+    dies stops renewing, and the cron deadman releases it within the TTL.
+    This is also how a six-hour off-peak window is covered without ever
+    exceeding control.MAX_LEASE_MINUTES.
+
+  * **Actuation takes 18-31 s.** Commands go out COMMAND_LEAD seconds before
+    a slot opens and the release goes out RELEASE_LEAD seconds before it
+    shuts, so the battery is at setpoint for the whole cheap period and is
+    never still importing when the price steps back up.
+
+  * **One second minimum between Modbus requests.** A tick costs ~4 s of
+    wall clock in reads alone. The loop sleeps until the next moment a
+    decision could actually change, so it is idle almost all the time.
+
+If Octopus is unreachable the loop falls back to the *guaranteed* 23:30-05:30
+window, which needs no API. That is deliberately conservative: a bonus
+dispatch slot we cannot confirm is a slot we do not charge on.
+
+Usage:
+    python3 reconcile.py --dry-run          # log decisions, write nothing
+    python3 reconcile.py                    # run the loop
+    python3 reconcile.py --once             # one pass, then exit
+    python3 reconcile.py --kw 5 --log-file /var/log/oig.log
+"""
+
+from __future__ import annotations
+
+import argparse
+import atexit
+import logging
+import os
+import signal
+import sys
+import time
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+
+import control
+import registers as R
+from config import ConfigError, load_env, resolve_host
+from octopus import (LOCAL_TZ, OctopusClient, OctopusError, Slot,
+                     merge, off_peak_windows)
+from sigen import ModbusError, SigenClient
+
+log = logging.getLogger("reconcile")
+
+# Longest a tick may sleep. The schedule is also consulted for nearer events,
+# so this is an upper bound, not a cadence.
+POLL_INTERVAL = 300.0
+
+# While charging on a bonus slot we poll harder: Octopus can withdraw one at
+# short notice, and every minute we are slow to notice is imported at peak.
+DISPATCH_POLL_INTERVAL = 120.0
+
+# Actuation is 18-31 s, so lead the opening boundary comfortably.
+COMMAND_LEAD = 60.0
+# Release is 5-15 s. Give the price boundary a wider berth than that: the
+# cost of stopping 30 s early is ~0.04 kWh, the cost of stopping late is
+# peak-rate import.
+RELEASE_LEAD = 30.0
+
+# Rolling lease. Must stay well under control.MAX_LEASE_MINUTES, and
+# comfortably above the renewal cadence so a slow tick never lets it lapse.
+LEASE_TTL_MINUTES = 15
+
+# Below this there is no point actuating at all -- the command would barely
+# have taken effect before it was withdrawn.
+MIN_SLOT_SECONDS = 120.0
+
+DEFAULT_CHARGE_KW = 5.0
+SCHEDULE_HORIZON_HOURS = 24
+
+# Charge limit is a U32 with gain 1000, so compare in kW with a little slack.
+LIMIT_TOLERANCE_KW = 0.005
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+# --------------------------------------------------------------------------
+# schedule -> intent   (pure functions; these are what the tests pin down)
+# --------------------------------------------------------------------------
+
+def effective_window(slot: Slot) -> tuple[datetime, datetime]:
+    """The period we actually command, once lead times are applied."""
+    return (slot.start - timedelta(seconds=COMMAND_LEAD),
+            slot.end - timedelta(seconds=RELEASE_LEAD))
+
+
+def is_worth_commanding(slot: Slot) -> bool:
+    begin, finish = effective_window(slot)
+    return (finish - begin).total_seconds() >= MIN_SLOT_SECONDS
+
+
+def desired_slot(slots: list[Slot], now: datetime) -> Slot | None:
+    """The slot we should be charging for right now, or None.
+
+    Lead times are folded in here rather than at the call site so that the
+    loop's notion of 'now is a charging moment' and its notion of 'when does
+    that next change' cannot drift apart.
+    """
+    for slot in slots:
+        if not is_worth_commanding(slot):
+            continue
+        begin, finish = effective_window(slot)
+        if begin <= now < finish:
+            return slot
+    return None
+
+
+def next_event(slots: list[Slot], now: datetime) -> datetime | None:
+    """The next instant at which desired_slot() could return something else.
+
+    Sleeping to exactly this point is what keeps the loop both punctual and
+    almost entirely idle.
+    """
+    edges = []
+    for slot in slots:
+        if not is_worth_commanding(slot):
+            continue
+        for edge in effective_window(slot):
+            if edge > now:
+                edges.append(edge)
+    return min(edges) if edges else None
+
+
+def fallback_slots(now: datetime, hours: int) -> list[Slot]:
+    """Guaranteed off-peak windows only. Computable with no network."""
+    horizon_end = now + timedelta(hours=hours)
+    return [s for s in merge(off_peak_windows(now, hours))
+            if s.end > now and s.start < horizon_end]
+
+
+# --------------------------------------------------------------------------
+# plant
+# --------------------------------------------------------------------------
+
+@dataclass
+class PlantState:
+    enable: int
+    mode: int
+    soc: float | None
+    charge_limit_kw: float | None
+
+    def is_charging_at(self, kw: float) -> bool:
+        return (self.enable == 1
+                and self.mode == R.EMS_COMMAND_CHARGE_GRID_FIRST
+                and self.charge_limit_kw is not None
+                and abs(self.charge_limit_kw - kw) <= LIMIT_TOLERANCE_KW)
+
+
+def with_retry(fn, *args, attempts: int = 2, **kwargs):
+    """One retry on a transport blip.
+
+    A connection idle for five minutes may have been dropped by the plant,
+    and SigenClient only finds out on the next call -- at which point it has
+    already reconnected for us. Retrying once turns that into a non-event.
+    """
+    last: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            return fn(*args, **kwargs)
+        except (ModbusError, OSError) as exc:
+            last = exc
+            if attempt + 1 < attempts:
+                log.warning("modbus call failed (%s); retrying", exc)
+                time.sleep(1.0)      # also honours the inter-request floor
+    assert last is not None
+    raise last
+
+
+# --------------------------------------------------------------------------
+# the loop
+# --------------------------------------------------------------------------
+
+class Reconciler:
+    def __init__(self, client: SigenClient, octopus: OctopusClient | None,
+                 charge_kw: float, target_soc: float,
+                 dry_run: bool = False) -> None:
+        self.client = client
+        self.octopus = octopus
+        self.charge_kw = charge_kw
+        self.target_soc = target_soc
+        self.dry_run = dry_run
+        self.lease = control.Lease(client, log=log.info)
+        self._last_source = "none"
+        self._holding_dispatch = False
+
+    # -- inputs ----------------------------------------------------------
+
+    def fetch_slots(self, now: datetime) -> list[Slot]:
+        if self.octopus is None:
+            self._last_source = "off-peak only (no Octopus client)"
+            return fallback_slots(now, SCHEDULE_HORIZON_HOURS)
+        try:
+            slots = self.octopus.cheap_slots(SCHEDULE_HORIZON_HOURS, now)
+            self._last_source = "octopus"
+            return slots
+        except (OctopusError, OSError) as exc:
+            # Conservative on purpose: we keep the window we can prove and
+            # drop every bonus slot we cannot.
+            log.warning("Octopus unreachable (%s) -- falling back to the "
+                        "guaranteed off-peak window only", exc)
+            self._last_source = "fallback"
+            return fallback_slots(now, SCHEDULE_HORIZON_HOURS)
+
+    def read_plant(self) -> PlantState:
+        enable = with_retry(self.client.read_u16, R.REMOTE_EMS_ENABLE.address)
+        mode = with_retry(self.client.read_u16, R.REMOTE_EMS_MODE.address)
+        soc = with_retry(R.read, self.client, R.ESS_SOC)
+        limit = with_retry(R.read, self.client, R.ESS_MAX_CHARGE_LIMIT)
+        return PlantState(enable, mode,
+                          soc if isinstance(soc, (int, float)) else None,
+                          limit if isinstance(limit, (int, float)) else None)
+
+    # -- outputs ---------------------------------------------------------
+
+    def ensure_charging(self, slot: Slot, state: PlantState) -> str:
+        if state.is_charging_at(self.charge_kw) and self.lease.held:
+            self.lease.renew(LEASE_TTL_MINUTES)
+            return "holding"
+        if self.dry_run:
+            return "WOULD START charging"
+        # Covers both a cold start and a plant that drifted underneath us
+        # (someone used the app, or it restarted). acquire() writes the state
+        # file before any register, and orders limits -> mode -> enable.
+        self.lease.acquire(R.EMS_COMMAND_CHARGE_GRID_FIRST,
+                           self.charge_kw, LEASE_TTL_MINUTES)
+        self.lease.renew(LEASE_TTL_MINUTES)
+        return "STARTED charging"
+
+    def ensure_released(self, state: PlantState) -> str:
+        if self.lease.held:
+            if self.dry_run:
+                return "WOULD RELEASE"
+            self.lease.release()
+            self.lease = control.Lease(self.client, log=log.info)
+            return "RELEASED"
+        if state.enable == 1:
+            # Not our lease, but Remote EMS is on and we believe it should
+            # not be. Say so; do not fight whatever set it.
+            log.warning("Remote EMS is enabled but no lease of ours is held "
+                        "-- another controller may be active. Leaving it.")
+            return "foreign lease, untouched"
+        if not self.dry_run:
+            # Nothing is held and nothing is enabled, so any lease file left
+            # here is stale. Dry run stays hands-off even about that.
+            control.clear_state()
+        return "idle"
+
+    # -- one pass --------------------------------------------------------
+
+    def tick(self, now: datetime | None = None) -> str:
+        now = now or utcnow()
+        slots = self.fetch_slots(now)
+        target = desired_slot(slots, now)
+        state = self.read_plant()
+
+        reason = ""
+        if target is not None and state.soc is not None \
+                and state.soc >= self.target_soc:
+            log.info("inside a cheap slot but SOC is %.1f%% (target %.1f%%) "
+                     "-- nothing to gain", state.soc, self.target_soc)
+            target = None
+            reason = " (battery at target)"
+
+        self._holding_dispatch = bool(
+            target is not None and "dispatch" in target.source)
+
+        if target is not None:
+            begin, finish = effective_window(target)
+            log.info("cheap now [%s]: %s until %s local",
+                     target.source, self._last_source,
+                     finish.astimezone(LOCAL_TZ).strftime("%H:%M:%S"))
+            action = self.ensure_charging(target, state)
+        else:
+            action = self.ensure_released(state)
+
+        log.info("SOC %s  enable=%d mode=%d limit=%s -> %s%s",
+                 f"{state.soc:.1f}%" if state.soc is not None else "?",
+                 state.enable, state.mode,
+                 f"{state.charge_limit_kw:.2f} kW"
+                 if state.charge_limit_kw is not None else "unset",
+                 action, reason)
+        return action
+
+    def sleep_seconds(self, now: datetime, slots: list[Slot]) -> float:
+        cap = (DISPATCH_POLL_INTERVAL if self._holding_dispatch
+               else POLL_INTERVAL)
+        event = next_event(slots, now)
+        if event is None:
+            return cap
+        # A second of slack, so we wake just after the boundary rather than
+        # a hair before it and have to go round again.
+        return max(1.0, min(cap, (event - now).total_seconds() + 1.0))
+
+    def run(self) -> int:
+        log.info("reconciler started (charge %.2f kW, target SOC %.1f%%, "
+                 "lease TTL %d min%s)", self.charge_kw, self.target_soc,
+                 LEASE_TTL_MINUTES, ", DRY RUN" if self.dry_run else "")
+        while True:
+            now = utcnow()
+            try:
+                self.tick(now)
+                slots = self.fetch_slots(now)
+            except (ModbusError, OSError) as exc:
+                # Fail safe: we would rather give the plant back and lose a
+                # cheap slot than hold a charge command we cannot see.
+                log.error("tick failed (%s) -- releasing and retrying", exc)
+                self.safe_release()
+                slots = []
+            delay = self.sleep_seconds(utcnow(), slots)
+            log.debug("sleeping %.0fs", delay)
+            time.sleep(delay)
+
+    def safe_release(self) -> None:
+        """Release, swallowing failures. Called from the error path and from
+        atexit, where raising would obscure the original problem."""
+        try:
+            if self.lease.held:
+                self.lease.release()
+        except (ModbusError, OSError) as exc:
+            log.error("RELEASE FAILED (%s). The plant may still be under "
+                      "Remote EMS control. Run: python3 control.py release",
+                      exc)
+
+
+# --------------------------------------------------------------------------
+# startup
+# --------------------------------------------------------------------------
+
+def another_controller_running() -> int | None:
+    """A live pid in the lease file that is not us means two controllers."""
+    state = control.read_state()
+    if not state:
+        return None
+    pid = state.get("pid")
+    if not isinstance(pid, int) or pid == os.getpid():
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return None          # stale pid, the process is gone
+    except PermissionError:
+        return pid           # alive, just not ours to signal
+    except OSError:
+        return None
+    return pid
+
+
+def setup_logging(path: str | None, verbose: bool) -> None:
+    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
+    if path:
+        handlers.append(logging.FileHandler(path))
+    logging.basicConfig(
+        level=logging.DEBUG if verbose else logging.INFO,
+        format="%(asctime)s %(levelname)-7s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        handlers=handlers,
+    )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("host", nargs="?",
+                        help="SigenStor address (default: SIGEN_HOST in .env)")
+    parser.add_argument("--port", type=int, default=502)
+    parser.add_argument("--kw", type=float, default=DEFAULT_CHARGE_KW,
+                        help=f"charge power limit (default {DEFAULT_CHARGE_KW})")
+    parser.add_argument("--target-soc", type=float,
+                        default=control.CHARGE_SOC_CEILING,
+                        help="stop charging at this SOC")
+    parser.add_argument("--once", action="store_true",
+                        help="one reconcile pass, then exit")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="log decisions but write no registers")
+    parser.add_argument("--no-octopus", action="store_true",
+                        help="ignore bonus slots; guaranteed window only")
+    parser.add_argument("--log-file")
+    parser.add_argument("-v", "--verbose", action="store_true")
+    args = parser.parse_args()
+
+    setup_logging(args.log_file, args.verbose)
+
+    if args.kw <= 0:
+        log.error("--kw must be positive")
+        return 2
+    if LEASE_TTL_MINUTES > control.MAX_LEASE_MINUTES:
+        log.error("LEASE_TTL_MINUTES exceeds the %d min ceiling",
+                  control.MAX_LEASE_MINUTES)
+        return 2
+
+    other = another_controller_running()
+    if other is not None:
+        log.error("pid %d already holds %s -- refusing to start a second "
+                  "controller", other, control.STATE_FILE.name)
+        return 2
+
+    try:
+        host = resolve_host(args.host)
+        octopus = None
+        if not args.no_octopus:
+            env = load_env()
+            octopus = OctopusClient(env["OCTOPUS_API_KEY"],
+                                    env["OCTOPUS_ACCOUNT_NUMBER"])
+    except (ConfigError, KeyError) as exc:
+        log.error("configuration: %s", exc)
+        return 1
+
+    try:
+        with SigenClient(host, port=args.port) as client:
+            rec = Reconciler(client, octopus, args.kw, args.target_soc,
+                             dry_run=args.dry_run)
+
+            def on_signal(signum, _frame):
+                log.info("caught signal %d", signum)
+                raise KeyboardInterrupt
+
+            signal.signal(signal.SIGINT, on_signal)
+            signal.signal(signal.SIGTERM, on_signal)
+            atexit.register(rec.safe_release)
+
+            try:
+                if args.once:
+                    rec.tick()
+                    return 0
+                return rec.run()
+            except KeyboardInterrupt:
+                log.info("interrupted -- releasing")
+                return 0
+            finally:
+                rec.safe_release()
+    except (ModbusError, OSError) as exc:
+        log.error("%s", exc)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

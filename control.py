@@ -107,8 +107,9 @@ def clear_state() -> None:
 class Lease:
     """Holds a Remote EMS command and guarantees it is given back."""
 
-    def __init__(self, client: SigenClient) -> None:
+    def __init__(self, client: SigenClient, log=print) -> None:
         self.client = client
+        self.log = log
         self.original_mode: int | None = None
         self.held = False
         self._released = False
@@ -127,8 +128,8 @@ class Lease:
         self.original_mode = before["remote_ems_mode"]
 
         if before["remote_ems_enable"] == 1:
-            print("  ! Remote EMS was ALREADY enabled before we started.")
-            print("    Something else may be controlling this plant.")
+            self.log("  ! Remote EMS was ALREADY enabled before we started.")
+            self.log("    Something else may be controlling this plant.")
 
         deadline = datetime.now(timezone.utc) + timedelta(minutes=minutes)
 
@@ -153,16 +154,36 @@ class Lease:
         if power_kw is not None and limit_reg is not None:
             raw = int(round(power_kw * limit_reg.gain))
             self.client.write_u32(limit_reg.address, raw)
-            print(f"  wrote {limit_reg.address} {limit_reg.name} "
+            self.log(f"  wrote {limit_reg.address} {limit_reg.name} "
                   f"= {power_kw:.2f} kW")
 
         self.client.write_u16(R.REMOTE_EMS_MODE.address, mode)
-        print(f"  wrote 40031 mode = {mode} "
+        self.log(f"  wrote 40031 mode = {mode} "
               f"({R.EMS_MODE_NAMES.get(mode, '?')})")
 
         self.client.write_u16(R.REMOTE_EMS_ENABLE.address, 1)
         self.held = True
-        print("  wrote 40029 remote EMS enable = 1  -- LEASE HELD")
+        self.log("  wrote 40029 remote EMS enable = 1  -- LEASE HELD")
+
+    def renew(self, minutes: int) -> None:
+        """Push the lease deadline out without touching a single register.
+
+        This is the heartbeat: reconcile.py calls it every tick, so a loop
+        that dies simply stops renewing and the cron deadman releases within
+        `minutes`. It is also how a six-hour off-peak window is covered
+        without ever exceeding MAX_LEASE_MINUTES -- the lease stays short and
+        is rolled forward, rather than being taken out long.
+        """
+        if not self.held or self._released:
+            return
+        state = read_state() or {}
+        now = datetime.now(timezone.utc)
+        state.update({
+            "expires_at": (now + timedelta(minutes=minutes)).isoformat(),
+            "renewed_at": now.isoformat(),
+            "pid": os.getpid(),
+        })
+        write_state(state)
 
     def release(self) -> None:
         if self._released:
@@ -171,24 +192,24 @@ class Lease:
         if not self.held:
             clear_state()
             return
-        print("\n  releasing...")
+        self.log("\n  releasing...")
         try:
             self.client.write_u16(R.REMOTE_EMS_ENABLE.address, 0)
-            print("  wrote 40029 remote EMS enable = 0 "
+            self.log("  wrote 40029 remote EMS enable = 0 "
                   "-- plant back on its own EMS")
             if self.original_mode is not None:
                 self.client.write_u16(
                     R.REMOTE_EMS_MODE.address, self.original_mode)
-                print(f"  restored 40031 mode = {self.original_mode}")
+                self.log(f"  restored 40031 mode = {self.original_mode}")
         except (ModbusError, OSError) as exc:
-            print(f"\n  *** RELEASE FAILED: {exc}")
-            print("  *** The plant may still be under Remote EMS control.")
-            print(f"  *** Run:  python3 {Path(__file__).name} "
+            self.log(f"\n  *** RELEASE FAILED: {exc}")
+            self.log("  *** The plant may still be under Remote EMS control.")
+            self.log(f"  *** Run:  python3 {Path(__file__).name} "
                   f"{self.client.host} release")
             raise
         else:
             clear_state()
-            print("  released cleanly.")
+            self.log("  released cleanly.")
 
 
 # --------------------------------------------------------------------------

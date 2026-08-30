@@ -37,8 +37,16 @@ INPUT = {
 class MockPlant(threading.Thread):
     daemon = True
 
-    def __init__(self) -> None:
+    def __init__(self, holding: dict | None = None,
+                 input_regs: dict | None = None) -> None:
         super().__init__()
+        # Default to the module-level tables so existing callers are
+        # unaffected; pass your own to get an isolated plant.
+        self.holding = HOLDING if holding is None else holding
+        self.input = INPUT if input_regs is None else input_regs
+        # Set >0 to make the next N requests fail as 'slave device failure',
+        # so callers can prove their fail-safe path.
+        self.faults = 0
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.bind(("127.0.0.1", 0))
@@ -82,9 +90,12 @@ class MockPlant(threading.Thread):
 
     def _handle(self, pdu: bytes) -> bytes:
         fc = pdu[0]
+        if self.faults > 0:
+            self.faults -= 1
+            return struct.pack(">BB", fc | 0x80, 0x04)
         if fc in (0x03, 0x04):
             address, count = struct.unpack(">HH", pdu[1:5])
-            table = HOLDING if fc == 0x03 else INPUT
+            table = self.holding if fc == 0x03 else self.input
             values = []
             for i in range(count):
                 if address + i not in table:
@@ -94,14 +105,14 @@ class MockPlant(threading.Thread):
                     + struct.pack(f">{count}H", *values))
         if fc == 0x06:
             address, value = struct.unpack(">HH", pdu[1:5])
-            HOLDING[address] = value
+            self.holding[address] = value
             self.writes.append((address, [value]))
             return pdu
         if fc == 0x10:
             address, count = struct.unpack(">HH", pdu[1:5])
             values = list(struct.unpack(f">{count}H", pdu[6:6 + count * 2]))
             for i, v in enumerate(values):
-                HOLDING[address + i] = v
+                self.holding[address + i] = v
             self.writes.append((address, values))
             return struct.pack(">BHH", fc, address, count)
         return struct.pack(">BB", fc | 0x80, 0x01)
