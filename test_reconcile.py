@@ -299,6 +299,21 @@ def main() -> int:
     check("and a withdrawn one disappears again", len(rec_c._slots), 0)
     check("three ticks, three calls -- not six", oct_c.calls, 3)
 
+    print("\nSIGHUP cuts the sleep short, for the moment you plug in")
+    import time as _t
+    rec_h = reconciler(make_plant(), FakeOctopus([]))
+    reconcile._refresh = False
+    t0 = _t.monotonic()
+    rec_h._sleep(1.0)                      # no refresh: sleeps normally
+    check("a short sleep runs to completion",
+          _t.monotonic() - t0 >= 0.9, True)
+    reconcile.request_refresh()
+    check("SIGHUP sets the flag", reconcile._refresh, True)
+    t0 = _t.monotonic()
+    rec_h._sleep(60.0)                     # would be a minute without it
+    check("and the sleep returns at once", _t.monotonic() - t0 < 1.0, True)
+    check("the flag is consumed, not sticky", reconcile._refresh, False)
+
     print("\nPolling sits on the half-hour grid, at :25 and :55")
     at = lambda h, m: datetime(2026, 1, 15, h, m, tzinfo=timezone.utc)
     check("just after the hour -> :25", reconcile.next_poll(at(21, 0)),

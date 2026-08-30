@@ -37,6 +37,11 @@ Usage:
     python3 reconcile.py                    # run the loop
     python3 reconcile.py --once             # one pass, then exit
     python3 reconcile.py --kw 5 --log-file /var/log/oig.log
+
+Send SIGHUP to re-poll immediately -- useful the moment you plug the car in,
+because that first dispatch starts between the scheduled polls:
+
+    kill -HUP $(pgrep -f 'reconcile.py')
 """
 
 from __future__ import annotations
@@ -62,6 +67,15 @@ from octopus import (LOCAL_TZ, OctopusClient, OctopusError, Slot,
 from sigen import ModbusError, SigenClient
 
 log = logging.getLogger("reconcile")
+
+# Set by SIGHUP. A flag rather than an exception on purpose: an exception
+# raised from a signal handler could land in the middle of a register write,
+# and nothing is allowed to interrupt the lease sequence.
+_refresh = False
+
+# Granularity of the interruptible sleep. Small enough that SIGHUP and
+# SIGTERM feel immediate, large enough to stay idle.
+SLEEP_CHUNK = 5.0
 
 # Longest a tick may sleep. The schedule is also consulted for nearer events,
 # so this is an upper bound, not a cadence.
@@ -115,6 +129,18 @@ LIMIT_TOLERANCE_KW = 0.005
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _stop_requested() -> bool:
+    """Signals raise KeyboardInterrupt directly, so nothing to poll here;
+    kept as a seam so the chunked sleep reads the same either way."""
+    return False
+
+
+def request_refresh(signum=None, _frame=None) -> None:
+    """SIGHUP handler. Sets a flag; the sleep loop picks it up."""
+    global _refresh
+    _refresh = True
 
 
 # --------------------------------------------------------------------------
@@ -448,6 +474,24 @@ class Reconciler:
                         exc)
             return False
 
+    def _sleep(self, seconds: float) -> None:
+        """Sleep in chunks so SIGHUP can cut it short.
+
+        The first dispatch after plugging in starts a few minutes after the
+        plug goes in and runs to the next half-hour boundary, so it lands
+        between scheduled polls. SIGHUP is how you say "I have just plugged
+        in, look now" without waiting for :25 or :55.
+        """
+        global _refresh
+        remaining = seconds
+        while remaining > 0 and not _stop_requested():
+            if _refresh:
+                _refresh = False
+                log.info("SIGHUP -- re-polling now")
+                return
+            time.sleep(min(SLEEP_CHUNK, remaining))
+            remaining -= SLEEP_CHUNK
+
     def sleep_seconds(self, now: datetime, slots: list[Slot]) -> float:
         # Base cadence is the half-hour grid. The exception is actively
         # holding a bonus slot: a withdrawal mid-charge costs real money, so
@@ -479,7 +523,7 @@ class Reconciler:
                 slots = []
             delay = self.sleep_seconds(utcnow(), slots)
             log.debug("sleeping %.0fs", delay)
-            time.sleep(delay)
+            self._sleep(delay)
 
     def safe_release(self) -> None:
         """Release, swallowing failures. Called from the error path and from
@@ -598,6 +642,8 @@ def main() -> int:
 
             signal.signal(signal.SIGINT, on_signal)
             signal.signal(signal.SIGTERM, on_signal)
+            if hasattr(signal, "SIGHUP"):
+                signal.signal(signal.SIGHUP, request_refresh)
             atexit.register(rec.safe_release)
 
             try:
