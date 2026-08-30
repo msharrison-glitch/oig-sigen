@@ -214,6 +214,24 @@ def main() -> int:
           rec_y.tick(now), "holding")
     check("and the Zappi is not re-queried once confirmed", zap.calls, 1)
 
+    # A car that starts mid-slot must still be caught: check again soon
+    # rather than waiting for the next :25/:55 poll.
+    plant_w = make_plant(soc_pct=40.0)
+    zap_w = FakeZappi(charging=False, power=0.0)
+    rec_w = reconcile.Reconciler(client_for(plant_w), FakeOctopus([live]),
+                                 5.0, 95.0, bonus_only=True, zappi=zap_w)
+    check("declined while the car is idle", rec_w.tick(now), "idle")
+    check("but flagged as worth watching",
+          rec_w._awaiting_confirmation, True)
+    check("so the next look is soon, not at :25",
+          rec_w.sleep_seconds(now, [live]),
+          reconcile.CONFIRM_POLL_INTERVAL + 1.0)
+    zap_w.charging = True
+    check("car starts mid-slot -> we ride the remainder",
+          rec_w.tick(now), "STARTED charging")
+    check("and stop watching once committed",
+          rec_w._awaiting_confirmation, False)
+
     # Unreachable Zappi must fail closed, never open.
     plant_d = make_plant(soc_pct=40.0)
     rec_d = reconcile.Reconciler(client_for(plant_d), FakeOctopus([live]),

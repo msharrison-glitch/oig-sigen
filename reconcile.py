@@ -93,6 +93,13 @@ DISPATCH_POLL_INTERVAL = 120.0
 # Event wakes still fire independently, so punctuality does not depend on it.
 POLL_MINUTES = (25, 55)
 
+# While a slot is live but the car has not yet started drawing, watch closely
+# rather than waiting for the next grid poll. Observed 2026-08-30: the
+# 23:00-23:30 dispatch was declined at 22:59 because the Zappi was Paused,
+# the car began drawing shortly after the slot opened, and the dispatch
+# completed -- so it was genuinely 4.49p and we sat out nearly all of it.
+CONFIRM_POLL_INTERVAL = 120.0
+
 # Actuation is 18-31 s, so lead the opening boundary comfortably.
 COMMAND_LEAD = 60.0
 
@@ -290,6 +297,9 @@ class Reconciler:
         # if the car pauses. Without that, a car that cycles would have us
         # acquiring and releasing every few minutes at 20-30 s a time.
         self._confirmed: set[str] = set()
+        # True when a slot is live but the car is not yet drawing: keep
+        # watching, because it may start at any moment.
+        self._awaiting_confirmation = False
         self._slots: list[Slot] = []
         self._known: set[tuple[str, str, str]] | None = None
         self.client = client
@@ -426,6 +436,7 @@ class Reconciler:
         # the period bills at PEAK -- so importing on the plan alone can buy
         # expensive electricity. Requiring the Zappi to be drawing turns the
         # forecast into an observation.
+        self._awaiting_confirmation = False
         if target is not None and self.zappi is not None:
             key = target.start.isoformat()
             if key not in self._confirmed:
@@ -440,6 +451,9 @@ class Reconciler:
                              target.local()[0].strftime("%H:%M"))
                     target = None
                     reason = " (dispatch unconfirmed)"
+                    # Keep watching: a car that starts five minutes in still
+                    # leaves most of the slot worth having.
+                    self._awaiting_confirmation = True
 
         self._holding_dispatch = bool(
             target is not None and "dispatch" in target.source)
@@ -560,6 +574,8 @@ class Reconciler:
         wake = next_poll(now)
         if self._holding_dispatch:
             wake = min(wake, now + timedelta(seconds=DISPATCH_POLL_INTERVAL))
+        if self._awaiting_confirmation:
+            wake = min(wake, now + timedelta(seconds=CONFIRM_POLL_INTERVAL))
         event = next_event(slots, now)
         if event is not None:
             wake = min(wake, event)
