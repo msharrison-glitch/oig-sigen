@@ -125,6 +125,28 @@ def main() -> int:
     check("after the slot -> nothing",
           reconcile.desired_slot([s], s.end + timedelta(minutes=1)), None)
 
+    print("\nConfirmation wake, 5 min before a slot opens")
+    # The schedule churns, so we want to be awake and re-polling shortly
+    # before committing, not merely near the boundary by luck of the cap.
+    far = slot_at(now, 30, 60, "dispatch")
+    begin = far.start - timedelta(seconds=reconcile.COMMAND_LEAD)
+    confirm_at = begin - timedelta(seconds=reconcile.CONFIRM_LEAD
+                                   - reconcile.COMMAND_LEAD)
+    check("the next wake is the confirmation, not the command",
+          reconcile.next_event([far], now), confirm_at)
+    check("nothing to confirm while still far out",
+          reconcile.upcoming([far], now), [])
+    check("inside the confirmation window it is flagged",
+          reconcile.upcoming([far], confirm_at + timedelta(seconds=1))
+          == [far], True)
+    check("but still not commanded yet",
+          reconcile.desired_slot([far], confirm_at + timedelta(seconds=1)),
+          None)
+    check("commanded once the lead-in arrives",
+          reconcile.desired_slot([far], begin) is far, True)
+    check("a slot withdrawn after confirming is simply not commanded",
+          reconcile.desired_slot([], begin), None)
+
     print("\nSlots too short to be worth actuating")
     tiny = slot_at(now, 10, 10.5)                # 30 s
     check("30 s slot is skipped", reconcile.is_worth_commanding(tiny), False)
@@ -133,8 +155,13 @@ def main() -> int:
     check("30 min slot is commanded", reconcile.is_worth_commanding(s), True)
 
     print("\nWhen does the decision next change")
-    check("next event is the lead-in, not the raw start",
-          reconcile.next_event([s], now), s.start - timedelta(seconds=60))
+    check("next event is the confirmation wake, well before the start",
+          reconcile.next_event([s], now),
+          s.start - timedelta(seconds=reconcile.CONFIRM_LEAD))
+    check("and the lead-in is the wake after that",
+          reconcile.next_event([s], s.start
+                               - timedelta(seconds=reconcile.CONFIRM_LEAD)),
+          s.start - timedelta(seconds=reconcile.COMMAND_LEAD))
     check("no slots -> no event", reconcile.next_event([], now), None)
 
     print("\nOctopus outage falls back to the guaranteed window")

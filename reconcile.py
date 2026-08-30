@@ -78,6 +78,12 @@ BONUS_POLL_INTERVAL = 120.0
 
 # Actuation is 18-31 s, so lead the opening boundary comfortably.
 COMMAND_LEAD = 60.0
+
+# Wake this long before a slot opens purely to re-confirm it still exists.
+# The schedule churns, and a slot withdrawn between the confirmation and the
+# command is one we never start actuating for -- 20-30 s of pointless writes
+# and, worse, a charge command for a period that is no longer cheap.
+CONFIRM_LEAD = 300.0
 # Release is 5-15 s. Give the price boundary a wider berth than that: the
 # cost of stopping 30 s early is ~0.04 kWh, the cost of stopping late is
 # peak-rate import.
@@ -140,6 +146,22 @@ def desired_slot(slots: list[Slot], now: datetime) -> Slot | None:
     return None
 
 
+def upcoming(slots: list[Slot], now: datetime) -> list[Slot]:
+    """Slots whose commanded window opens within CONFIRM_LEAD.
+
+    These are the ones worth re-confirming: close enough to matter, far
+    enough out that a withdrawal still costs us nothing.
+    """
+    out = []
+    for slot in slots:
+        if not is_worth_commanding(slot):
+            continue
+        begin, _ = effective_window(slot)
+        if now < begin <= now + timedelta(seconds=CONFIRM_LEAD):
+            out.append(slot)
+    return out
+
+
 def next_event(slots: list[Slot], now: datetime) -> datetime | None:
     """The next instant at which desired_slot() could return something else.
 
@@ -150,7 +172,12 @@ def next_event(slots: list[Slot], now: datetime) -> datetime | None:
     for slot in slots:
         if not is_worth_commanding(slot):
             continue
-        for edge in effective_window(slot):
+        begin, finish = effective_window(slot)
+        # The confirmation wake is a first-class event: we want to be awake
+        # and re-polling before a slot opens, not merely close to it because
+        # the poll cap happened to land there.
+        for edge in (begin - timedelta(seconds=CONFIRM_LEAD - COMMAND_LEAD),
+                     begin, finish):
             if edge > now:
                 edges.append(edge)
     return min(edges) if edges else None
@@ -347,6 +374,12 @@ class Reconciler:
 
         self._holding_dispatch = bool(
             target is not None and "dispatch" in target.source)
+
+        for soon in upcoming(slots, now):
+            begin, _ = effective_window(soon)
+            log.info("CONFIRMED %s [%s] still scheduled; commanding in %.0fs",
+                     soon.local()[0].strftime("%H:%M"), soon.source,
+                     (begin - now).total_seconds())
 
         if target is not None:
             begin, finish = effective_window(target)
