@@ -1,0 +1,10 @@
+# Deadman. Install with:  sudo crontab -u oig deploy/oig-sigen.cron
+#
+# Releases only if a lease exists AND has expired, so it is safe to run
+# against a healthy agent -- reconcile.py renews every tick, so a live agent
+# never presents an expired lease. A dead one stops renewing and is caught
+# within LEASE_TTL_MINUTES (15) plus this interval.
+#
+# MUST run as the same user, from the same directory, as the service.
+
+*/5 * * * * cd /opt/oig-sigen && /usr/bin/python3 control.py --deadman >> /var/log/oig-sigen-deadman.log 2>&1

@@ -1,0 +1,46 @@
+# Per-site agent. Install to /etc/systemd/system/oig-sigen.service
+#
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now oig-sigen
+#   journalctl -u oig-sigen -f
+#
+# WorkingDirectory is load-bearing: control.py writes .lease.json beside the
+# scripts, and the cron deadman looks for it in the same place. Run the two
+# as the same user from the same directory or the deadman silently protects
+# nothing.
+
+[Unit]
+Description=OIG to SigenStor reconciliation agent
+Documentation=https://github.com/msharrison-glitch/oig-sigen
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=oig
+Group=oig
+WorkingDirectory=/opt/oig-sigen
+ExecStart=/usr/bin/python3 /opt/oig-sigen/reconcile.py --kw 5
+
+# SIGTERM is wired to the release path. Give it room: a release is 5-15 s,
+# and with_retry may take another second or two on a flaky link.
+KillSignal=SIGTERM
+TimeoutStopSec=60
+
+# Belt and braces. `release` is idempotent -- a no-op when nothing is held,
+# and the one thing that must happen when the agent goes away.
+ExecStopPost=/usr/bin/python3 /opt/oig-sigen/control.py release
+
+Restart=always
+RestartSec=30
+
+# The agent needs its own directory (.lease.json, .octopus-token.json) and
+# nothing else on the box.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/oig-sigen
+
+[Install]
+WantedBy=multi-user.target
