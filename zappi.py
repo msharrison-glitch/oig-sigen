@@ -15,7 +15,7 @@ which is handled. Stdlib only.
 
 Credentials. Two routes, and the digest exchange cannot tell them apart:
 
-  1. API key: myaccount.myenergi.net -> Products -> the Gateway Device row at
+  1. API key: myaccount.myenergi.com -> Products -> the Gateway Device row at
      the top -> "Advanced" (key icon) -> Generate new API key. Only the
      account that REGISTERED the devices has that button; if an installer set
      the system up, it is on their account, not yours.
@@ -46,6 +46,8 @@ TIMEOUT = 20.0
 # an anti-scraping rule catching a client they issue API keys for. Identify
 # ourselves properly instead. Override with MYENERGI_USER_AGENT if their
 # rules tighten again.
+# Note the domains differ: the account portal is myenergi.COM, the API is on
+# myenergi.NET. Easy to conflate, and the wrong one fails confusingly.
 DIRECTOR_HOST = "director.myenergi.net"
 
 DEFAULT_USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -158,7 +160,7 @@ def client_from_env() -> ZappiClient:
     if not serial or not key:
         raise ConfigError(
             "MYENERGI_SERIAL and MYENERGI_API_KEY are not set. Get an API "
-            "key from myaccount.myenergi.net -> Advanced -> API key, and use "
+            "key from myaccount.myenergi.com -> Advanced -> API key, and use "
             "the HUB serial as the username.")
     return ZappiClient(serial, key,
                        user_agent=env.get("MYENERGI_USER_AGENT")
