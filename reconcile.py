@@ -45,9 +45,12 @@ import argparse
 import atexit
 import logging
 import os
+import json
 import signal
 import sys
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -82,6 +85,13 @@ LEASE_TTL_MINUTES = 15
 # Below this there is no point actuating at all -- the command would barely
 # have taken effect before it was withdrawn.
 MIN_SLOT_SECONDS = 120.0
+
+AGENT_VERSION = "1.0"
+
+# Heartbeats are fire-and-forget. Short timeout, every failure swallowed: the
+# watchdog exists to observe the plant, and an observer that can stall or
+# crash the controller is worse than no observer at all.
+HEARTBEAT_TIMEOUT = 5.0
 
 DEFAULT_CHARGE_KW = 5.0
 SCHEDULE_HORIZON_HOURS = 24
@@ -193,7 +203,10 @@ def with_retry(fn, *args, attempts: int = 2, **kwargs):
 class Reconciler:
     def __init__(self, client: SigenClient, octopus: OctopusClient | None,
                  charge_kw: float, target_soc: float,
-                 dry_run: bool = False) -> None:
+                 dry_run: bool = False, heartbeat_url: str | None = None,
+                 site_token: str | None = None) -> None:
+        self.heartbeat_url = heartbeat_url
+        self.site_token = site_token
         self.client = client
         self.octopus = octopus
         self.charge_kw = charge_kw
@@ -299,7 +312,42 @@ class Reconciler:
                  f"{state.charge_limit_kw:.2f} kW"
                  if state.charge_limit_kw is not None else "unset",
                  action, reason)
+        self.send_heartbeat(state, action)
         return action
+
+    def send_heartbeat(self, state: PlantState, action: str) -> bool:
+        """Tell the off-box watchdog what we just saw. Never raises.
+
+        The watchdog cannot command anything, so this is a one-way report.
+        Everything is caught, including the unexpected: a controller that dies
+        because a monitoring endpoint returned malformed JSON would be a
+        spectacular own goal.
+        """
+        if not self.heartbeat_url or not self.site_token:
+            return False
+        lease = control.read_state()
+        payload = {
+            "lease_held": bool(self.lease.held),
+            "lease_expires": (lease or {}).get("expires_at"),
+            "soc": state.soc,
+            "mode": state.mode,
+            "enable": state.enable,
+            "action": action,
+            "agent_version": AGENT_VERSION,
+        }
+        request = urllib.request.Request(
+            self.heartbeat_url, data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {self.site_token}"},
+            method="POST")
+        try:
+            with urllib.request.urlopen(
+                    request, timeout=HEARTBEAT_TIMEOUT) as response:
+                return 200 <= response.status < 300
+        except Exception as exc:                  # noqa: BLE001 - deliberate
+            log.warning("heartbeat failed (%s) -- the plant is unaffected",
+                        exc)
+            return False
 
     def sleep_seconds(self, now: datetime, slots: list[Slot]) -> float:
         cap = (DISPATCH_POLL_INTERVAL if self._holding_dispatch
@@ -393,6 +441,10 @@ def main() -> int:
                         help="log decisions but write no registers")
     parser.add_argument("--no-octopus", action="store_true",
                         help="ignore bonus slots; guaranteed window only")
+    parser.add_argument("--heartbeat-url",
+                        help="off-box watchdog, e.g. "
+                             "https://host/v1/heartbeat")
+    parser.add_argument("--site-token", help="bearer token for the watchdog")
     parser.add_argument("--log-file")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
@@ -427,7 +479,9 @@ def main() -> int:
     try:
         with SigenClient(host, port=args.port) as client:
             rec = Reconciler(client, octopus, args.kw, args.target_soc,
-                             dry_run=args.dry_run)
+                             dry_run=args.dry_run,
+                             heartbeat_url=args.heartbeat_url,
+                             site_token=args.site_token)
 
             def on_signal(signum, _frame):
                 log.info("caught signal %d", signum)
