@@ -56,7 +56,22 @@ your inverter's operating mode as a side effect.
 
 ## The two ways it can charge
 
-### Cloud (`--via-cloud`) — recommended
+Both work. Which suits you depends mostly on **what operating mode you
+normally run**, and on how you weigh a third-party dependency against a
+side effect. Pick deliberately.
+
+### Local Modbus (default)
+
+Takes a Remote EMS lease and commands mode 3 (command charging, grid first).
+
+- Official, documented protocol; no third party in the loop
+- Works on your LAN alone — no internet needed
+- Power set per command (`--kw`)
+- **Releasing Remote EMS always returns the plant to Self-Consumption**, not
+  to the mode you had selected. Sigenergy firmware behaviour; it cannot be
+  undone over Modbus, because the operating mode has no register
+
+### Cloud (`--via-cloud`)
 
 Switches your plant to a charging profile you create once in the mySigen app,
 then switches it back.
@@ -64,20 +79,20 @@ then switches it back.
 - Nothing is latched at the plant; **your operating mode is preserved**
 - No LAN presence needed — it can run anywhere
 - Rate is fixed in the profile; change it in the app
-- Uses an **unofficial, undocumented** Sigenergy cloud API that has broken
-  once before and needs your full mySigen password in `.env`
+- Uses an **unofficial, undocumented** Sigenergy cloud API. It has broken
+  once before, its reference implementation has since been removed from
+  GitHub, and it needs your full mySigen password in `.env`
 
-### Local Modbus (default)
+### The thing that usually decides it
 
-Takes a Remote EMS lease and commands mode 3 (command charging, grid first).
+| You normally run | Modbus revert costs you | |
+|---|---|---|
+| **Self-Consumption** | nothing — you're returned where you were | Modbus is the simpler choice |
+| **Sigen AI / TOU / Feed-in** | that setting, on every slot | either use the cloud path, or accept resetting it |
 
-- Official, documented protocol; no third party involved
-- Power set per command (`--kw`)
-- **Releasing Remote EMS always returns the plant to Self-Consumption**, not
-  to the mode you had selected. This is Sigenergy firmware behaviour and
-  cannot be undone over Modbus. If you run Self-Consumption anyway it costs
-  you nothing; if you run Sigen AI, **every slot silently drops you out of
-  it** until you reset it in the app or let the cloud restore do it
+If you take the Modbus path on a non-Self-Consumption plant, the agent logs
+`MODE REVERTED` on every release and the optional watchdog flags the site, so
+it is at least visible rather than silent.
 
 ---
 
@@ -114,6 +129,14 @@ python3 reconcile.py --dry-run --once -v   # decides, writes nothing
 ---
 
 ## Run it
+
+Local Modbus:
+
+```sh
+python3 reconcile.py --bonus-only --require-ev --kw 5
+```
+
+Or via the cloud:
 
 ```sh
 python3 reconcile.py --bonus-only --require-ev \
