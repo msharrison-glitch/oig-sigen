@@ -622,6 +622,8 @@ class Reconciler:
     # -- one pass --------------------------------------------------------
 
     def tick(self, now: datetime | None = None) -> str:
+        # An explicit time is a test pinning the clock; leave it alone.
+        fixed_clock = now is not None
         now = now or utcnow()
         if self.restore_mode_via_cloud and not self._settle_pending_restore():
             # We owe the owner a mode we have not managed to set. Taking
@@ -631,8 +633,18 @@ class Reconciler:
             return "restore outstanding"
         slots = self.fetch_slots(now)
         self._slots = slots            # reused by sleep_seconds; do NOT refetch
-        target = desired_slot(slots, now)
         state = self.read_plant()
+
+        # Decide on the time it is NOW, not when the tick began. Fetching the
+        # schedule and reading four registers at the 1 s Modbus floor costs
+        # 5-6 s, and deciding on the stale timestamp meant we once held a
+        # lease two seconds after the deadline we had just printed -- the
+        # release then fell to the next poll and ran 40 s late, past the slot
+        # boundary and into peak rate. RELEASE_LEAD exists precisely to stop
+        # that, so it must be measured against the moment of the decision.
+        if not fixed_clock:
+            now = utcnow()
+        target = desired_slot(slots, now)
 
         reason = ""
         if target is not None and state.soc is not None \
@@ -850,7 +862,10 @@ class Reconciler:
         while True:
             now = utcnow()
             try:
-                self.tick(now)
+                # No argument: tick reads the clock itself, twice -- once to
+                # fetch, once to decide -- so the decision is not made on a
+                # timestamp that is already six seconds old.
+                self.tick()
                 slots = self._slots      # tick() already polled; one call only
             except (ModbusError, OSError) as exc:
                 # Fail safe: we would rather give the plant back and lose a

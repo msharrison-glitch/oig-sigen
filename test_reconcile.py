@@ -147,6 +147,24 @@ def main() -> int:
     check("a slot withdrawn after confirming is simply not commanded",
           reconcile.desired_slot([], begin), None)
 
+    print("\nThe decision uses the time it is MADE, not the tick start")
+    # Observed live 2026-08-31: the tick began at 22:59:27, spent ~5s on
+    # Modbus reads, and decided "still in the slot" against 22:59:27 -- two
+    # seconds after the 22:59:30 deadline it had just printed. The release
+    # then fell to the next poll and ran 40s late, past the boundary and into
+    # peak rate, which is exactly what RELEASE_LEAD exists to prevent.
+    import inspect
+    src = inspect.getsource(reconcile.Reconciler.tick)
+    check("tick re-reads the clock before deciding",
+          "if not fixed_clock" in src and "now = utcnow()" in src, True)
+    check("and desired_slot is evaluated after that",
+          src.index("if not fixed_clock") < src.index("desired_slot"), True)
+    check("a pinned clock is still honoured, so tests stay deterministic",
+          "fixed_clock = now is not None" in src, True)
+    run_src = inspect.getsource(reconcile.Reconciler.run)
+    check("the loop lets tick read its own clock",
+          "self.tick()" in run_src, True)
+
     print("\nSlots too short to be worth actuating")
     tiny = slot_at(now, 10, 10.5)                # 30 s
     check("30 s slot is skipped", reconcile.is_worth_commanding(tiny), False)
