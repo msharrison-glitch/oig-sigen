@@ -16,6 +16,12 @@ from pathlib import Path
 ENV_FILE = Path(__file__).with_name(".env")
 
 
+# Floor for any configured poll interval. Below roughly this, most of the
+# delay is the plant's own actuation latency (5-25 s to release), so faster
+# polling buys nothing and only adds load.
+MIN_POLL_SECONDS = 15.0
+
+
 class ConfigError(RuntimeError):
     """Missing or unusable .env configuration."""
 
@@ -24,6 +30,8 @@ class ConfigError(RuntimeError):
 # from .env, so a stray shell variable can never silently become config.
 ENV_KEYS = ("OCTOPUS_API_KEY", "OCTOPUS_ACCOUNT_NUMBER", "SIGEN_HOST",
             "IOG_OFF_PEAK_P", "IOG_PEAK_P",
+            "IOG_POLL_IDLE_SECONDS", "IOG_POLL_CHARGING_SECONDS",
+            "IOG_STATE_DIR",
             "MYENERGI_SERIAL", "MYENERGI_API_KEY", "MYENERGI_USER_AGENT",
             "SIGEN_CLOUD_USERNAME", "SIGEN_CLOUD_PASSWORD",
             "SIGEN_CLOUD_REGION")
@@ -35,9 +43,10 @@ def state_path(name: str) -> Path:
     Beside the scripts normally, which is what the cron deadman and the
     systemd unit expect. In a container that directory is inside the image
     and vanishes on restart -- taking .lease.json, the record of what we
-    commanded, with it -- so OIG_STATE_DIR redirects it to a volume.
+    commanded, with it -- so IOG_STATE_DIR redirects it to a volume.
     """
-    directory = os.environ.get("OIG_STATE_DIR")
+    directory = os.environ.get("IOG_STATE_DIR") or os.environ.get(
+        "OIG_STATE_DIR")   # OIG_ was the old spelling; accepted, undocumented
     if directory:
         return Path(directory) / name
     return Path(__file__).with_name(name)
@@ -76,6 +85,25 @@ def load_env(path: Path = ENV_FILE) -> dict[str, str]:
             f"    SIGEN_HOST=192.168.2.53"
         )
     return env
+
+
+def poll_seconds(key: str, default: float) -> float:
+    """A poll interval from .env, floored so a typo cannot hammer Octopus.
+
+    These ship to other people, all of them on the same tariff, so their
+    slots start at the same moments. A shared minimum keeps one careless
+    value from turning a dozen installations into a synchronised burst.
+    """
+    try:
+        value = float(load_env().get(key, "") or default)
+    except (ValueError, ConfigError):
+        return default
+    if value < MIN_POLL_SECONDS:
+        print(f"warning: {key}={value:g}s is below the {MIN_POLL_SECONDS:g}s "
+              f"minimum; using {MIN_POLL_SECONDS:g}s. Below this you are "
+              f"waiting on actuation latency, not detection.")
+        return MIN_POLL_SECONDS
+    return value
 
 
 def resolve_host(explicit: str | None) -> str:

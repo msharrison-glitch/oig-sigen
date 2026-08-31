@@ -26,7 +26,7 @@ RUN chmod +x /app/docker-entrypoint.sh
 # protects nothing. .octopus-token.json is a cache and merely nice to keep.
 RUN mkdir -p /state && chown oig:oig /state
 VOLUME /state
-ENV OIG_STATE_DIR=/state
+ENV IOG_STATE_DIR=/state
 
 USER oig
 

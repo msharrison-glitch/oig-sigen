@@ -20,7 +20,7 @@ image installs `tzdata` and sets `TZ`. If you swap the base image, keep both.
 **The state volume is not optional.** `.lease.json` is the record of what we
 commanded. Inside the image it dies with the container, and a deadman that
 finds no lease file silently protects nothing — the worst failure mode this
-project has, because it looks fine. `OIG_STATE_DIR=/state` redirects it to a
+project has, because it looks fine. `IOG_STATE_DIR=/state` redirects it to a
 volume; a host install leaves it beside the scripts, where the cron deadman
 and the systemd unit expect it.
 
@@ -46,7 +46,7 @@ anything:
 | `OCTOPUS_ACCOUNT_NUMBER` | `A-XXXXXXXX` |
 | `IOG_OFF_PEAK_P` / `IOG_PEAK_P` | your region's rates, for the cost summary |
 | `TZ` | `Europe/London` |
-| `OIG_STATE_DIR` | `/state` in the image; unset on a host install |
+| `IOG_STATE_DIR` | `/state` in the image; unset on a host install |
 
 Networking is plain bridge — it needs the plant on your LAN and
 `api.octopus.energy`. No host networking, no privileges, and it runs as a

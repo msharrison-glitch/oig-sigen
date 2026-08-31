@@ -48,9 +48,10 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import json
 import logging
 import os
-import json
+import random
 import signal
 import sys
 import time
@@ -61,7 +62,7 @@ from datetime import datetime, timedelta, timezone
 
 import control
 import registers as R
-from config import ConfigError, load_env, resolve_host
+from config import ConfigError, load_env, poll_seconds, resolve_host
 from octopus import (LOCAL_TZ, OctopusClient, OctopusError, Slot,
                      merge, off_peak_windows)
 from sigen import ModbusError, SigenClient
@@ -82,9 +83,22 @@ SLEEP_CHUNK = 5.0
 # so this is an upper bound, not a cadence.
 POLL_INTERVAL = 300.0
 
-# While charging on a bonus slot we poll harder: Octopus can withdraw one at
-# short notice, and every minute we are slow to notice is imported at peak.
-DISPATCH_POLL_INTERVAL = 120.0
+# --- poll cadences -------------------------------------------------------
+#
+# Both are overridable from .env, because the trade -- how much peak-rate
+# exposure you tolerate against how heavy a guest you are on Octopus's API --
+# is a judgement, not a fact.
+#
+# IOG_POLL_CHARGING_SECONDS: used whenever a slot is LIVE, both while we are
+# charging and while we are waiting for the car to start drawing. This is the
+# one that matters. Octopus withdraws slots at short notice -- observed two
+# minutes after charging began -- and every second between the withdrawal and
+# our noticing is imported at the PEAK rate. At the 30 s default, worst-case
+# exposure is about 45 s (30 s to notice, 5-25 s to release), which is short
+# enough to say plainly: if a slot is withdrawn, charging stops within a
+# minute. Going much below this buys little, because at that point most of
+# the delay is the plant's own actuation latency rather than detection.
+DISPATCH_POLL_INTERVAL = poll_seconds("IOG_POLL_CHARGING_SECONDS", 30.0)
 
 # Two different things need catching, and they need different cadences.
 #
@@ -92,21 +106,28 @@ DISPATCH_POLL_INTERVAL = 120.0
 # five minutes before each -- catches them precisely and cheaply.
 POLL_MINUTES = (25, 55)
 
-# New slots APPEAR at arbitrary times. The first dispatch after plugging in
-# starts within a few minutes of the plug going in and runs only to the next
-# half-hour boundary, so waiting for :25 or :55 can miss most of it: plug in
-# at 18:07 for an 18:07-18:30 slot and the aligned poll leaves four usable
-# minutes. Hence a floor on how stale the schedule may be, independent of the
-# grid. 5 minutes is 288 calls a day -- modest for a personal tool, and worth
-# it because that first slot is real money in winter.
-BASE_POLL_INTERVAL = 300.0
+# IOG_POLL_IDLE_SECONDS: used when nothing is happening. It governs how
+# quickly a NEW slot is noticed. That matters because the first dispatch
+# after plugging in starts within a few minutes of the plug going in and runs
+# only to the next half-hour boundary -- plug in at 18:07 for an 18:07-18:30
+# slot and a half-hourly poll leaves four usable minutes of it. No money is
+# at risk here, only opportunity, which is why the default is looser than the
+# charging one. 5 minutes is 288 calls a day: modest for a personal tool.
+BASE_POLL_INTERVAL = poll_seconds("IOG_POLL_IDLE_SECONDS", 300.0)
 
-# While a slot is live but the car has not yet started drawing, watch closely
-# rather than waiting for the next grid poll. Observed 2026-08-30: the
-# 23:00-23:30 dispatch was declined at 22:59 because the Zappi was Paused,
-# the car began drawing shortly after the slot opened, and the dispatch
-# completed -- so it was genuinely 4.49p and we sat out nearly all of it.
-CONFIRM_POLL_INTERVAL = 120.0
+# Everyone running this is on the same tariff, so their slots begin at the
+# same moments and synchronised polling from many installations is exactly
+# the pattern that gets an API rate-limited. A few seconds of jitter costs
+# nothing and spreads the load.
+POLL_JITTER_SECONDS = 5.0
+
+# A live slot whose dispatch is not yet confirmed uses the same cadence as
+# charging: it is the active case, we simply have not committed yet. Observed
+# 2026-08-30: the 23:00-23:30 dispatch was declined at 22:59 because the car
+# was Paused, it began drawing shortly after the slot opened, and the
+# dispatch completed -- so it was genuinely 4.49p and we sat out nearly all
+# of it. Reacting fast here is how that slot gets caught.
+CONFIRM_POLL_INTERVAL = DISPATCH_POLL_INTERVAL
 
 # Actuation is 18-31 s, so lead the opening boundary comfortably.
 COMMAND_LEAD = 60.0
@@ -746,8 +767,10 @@ class Reconciler:
         if event is not None:
             wake = min(wake, event)
         # A second of slack, so we wake just after the boundary rather than
-        # a hair before it and have to go round again.
-        return max(1.0, (wake - now).total_seconds() + 1.0)
+        # a hair before it and have to go round again. Plus a little jitter,
+        # so many installations on the same tariff do not poll in lockstep.
+        delay = (wake - now).total_seconds() + 1.0
+        return max(1.0, delay + random.uniform(0, POLL_JITTER_SECONDS))
 
     def run(self) -> int:
         log.info("reconciler started (charge %.2f kW, target SOC %.1f%%, "

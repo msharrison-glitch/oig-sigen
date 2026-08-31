@@ -127,6 +127,8 @@ match Sigenergy's password encoding, since Python ships no AES).
 | `IOG_OFF_PEAK_P` / `IOG_PEAK_P` | cost summary | rates vary by DNO region |
 | `SIGEN_CLOUD_USERNAME` / `_PASSWORD` / `_REGION` | `--via-cloud` | your mySigen app login |
 | `MYENERGI_SERIAL` / `_API_KEY` | `--require-zappi` | hub serial, not the Zappi's |
+| `IOG_POLL_CHARGING_SECONDS` | optional | default 30 — how fast a withdrawn slot is caught |
+| `IOG_POLL_IDLE_SECONDS` | optional | default 300 — how fast a new slot is noticed |
 
 ### Check it works before commanding anything
 
@@ -168,10 +170,16 @@ watchdog).
 
 ## How it decides
 
-Polls Octopus at least every five minutes, and specifically at `:25` and
-`:55` — five minutes before each half-hour boundary — to re-confirm a slot
-still exists before committing to it. It also wakes on every slot boundary,
-and drops to every two minutes while a slot is live.
+Polls Octopus at least every five minutes when idle, and at `:25` and `:55`
+— five minutes before each half-hour boundary — to re-confirm a slot still
+exists before committing to it. It also wakes on every slot boundary.
+
+**Once a slot is live it polls every 30 seconds.** Octopus withdraws slots at
+short notice, and every second between a withdrawal and our noticing is
+imported at the peak rate. Worst case is about 45 seconds of that: 30 to
+notice, 5–25 to release. Both cadences are configurable in `.env`, floored at
+15 seconds, and jittered a few seconds so many installations on the same
+tariff don't poll in lockstep.
 
 The five-minute floor matters for one case in particular: the first dispatch
 after you plug in starts within a few minutes of the plug going in and runs

@@ -227,8 +227,8 @@ def main() -> int:
     check("but flagged as worth watching",
           rec_w._awaiting_confirmation, True)
     check("so the next look is soon, not at :25",
-          rec_w.sleep_seconds(now, [live]),
-          reconcile.CONFIRM_POLL_INTERVAL + 1.0)
+          rec_w.sleep_seconds(now, [live]) <= reconcile.CONFIRM_POLL_INTERVAL
+          + reconcile.POLL_JITTER_SECONDS + 1, True)
     zap_w.charging = True
     check("car starts mid-slot -> we ride the remainder",
           rec_w.tick(now), "STARTED charging")
@@ -520,6 +520,16 @@ def main() -> int:
     check("and a withdrawn one disappears again", len(rec_c._slots), 0)
     check("three ticks, three calls -- not six", oct_c.calls, 3)
 
+    print("\nJitter so many installations do not poll in lockstep")
+    rec_j = reconciler(make_plant(), FakeOctopus([]))
+    waits = {round(rec_j.sleep_seconds(now, []), 3) for _ in range(20)}
+    check("successive sleeps differ", len(waits) > 1, True)
+    check("never below the interval", min(waits) >= reconcile.BASE_POLL_INTERVAL,
+          True)
+    check("never more than the jitter above it",
+          max(waits) <= reconcile.BASE_POLL_INTERVAL
+          + reconcile.POLL_JITTER_SECONDS + 1, True)
+
     print("\nSIGHUP cuts the sleep short, for the moment you plug in")
     import time as _t
     rec_h = reconciler(make_plant(), FakeOctopus([]))
@@ -552,26 +562,29 @@ def main() -> int:
     rec_c._holding_dispatch = False
     idle_wait = rec_c.sleep_seconds(at(21, 26), [])
     check("idle never waits longer than the base poll interval",
-          round(idle_wait), round(reconcile.BASE_POLL_INTERVAL) + 1)
+          idle_wait <= reconcile.BASE_POLL_INTERVAL
+          + reconcile.POLL_JITTER_SECONDS + 1, True)
     rec_c._holding_dispatch = True
     held_wait = rec_c.sleep_seconds(at(21, 26), [])
     check("but holding a bonus slot still checks sooner",
-          held_wait <= reconcile.DISPATCH_POLL_INTERVAL + 1, True)
+          held_wait <= reconcile.DISPATCH_POLL_INTERVAL
+          + reconcile.POLL_JITTER_SECONDS + 1, True)
 
     print("\nSleeping only until the decision could change")
     rec = reconciler(make_plant(), FakeOctopus([]))
     check("no events -> capped by the base poll, not the 25 min to :25",
-          rec.sleep_seconds(now, []),
-          reconcile.BASE_POLL_INTERVAL + 1.0)
+          rec.sleep_seconds(now, []) <= reconcile.BASE_POLL_INTERVAL
+          + reconcile.POLL_JITTER_SECONDS + 1, True)
     check("a new slot appearing is noticed within 5 min",
           reconcile.BASE_POLL_INTERVAL <= 300.0, True)
     soon = slot_at(now, 3, 60)
+    wait = rec.sleep_seconds(now, [soon])
     check("an imminent boundary shortens the sleep",
-          round(rec.sleep_seconds(now, [soon])), 121)
+          120 <= wait <= 121 + reconcile.POLL_JITTER_SECONDS, True)
     rec._holding_dispatch = True
-    check("holding a bonus slot polls harder (+1s wake slack)",
-          rec.sleep_seconds(now, []),
-          reconcile.DISPATCH_POLL_INTERVAL + 1.0)
+    check("holding a bonus slot polls harder",
+          rec.sleep_seconds(now, []) <= reconcile.DISPATCH_POLL_INTERVAL
+          + reconcile.POLL_JITTER_SECONDS + 1, True)
 
     print("\n" + "=" * 72)
     if failures:
