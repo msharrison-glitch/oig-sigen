@@ -587,6 +587,16 @@ class Reconciler:
         log.info("reconciler started (charge %.2f kW, target SOC %.1f%%, "
                  "lease TTL %d min%s)", self.charge_kw, self.target_soc,
                  LEASE_TTL_MINUTES, ", DRY RUN" if self.dry_run else "")
+        if not self.dry_run:
+            # Say this every start, because it is the one thing that makes
+            # this unsuitable for some plants and it cannot be detected from
+            # here -- the operational mode has no Modbus register.
+            log.warning(
+                "NOTE: releasing Remote EMS always returns this plant to "
+                "SELF-CONSUMPTION, not to whatever mode was selected before. "
+                "If your plant runs Self-Consumption anyway, that is a no-op. "
+                "If it runs Sigen AI, every slot will cost you that setting "
+                "until you restore it in the app.")
         while True:
             now = utcnow()
             try:

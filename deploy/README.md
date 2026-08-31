@@ -1,5 +1,23 @@
 # Deploying the agent
 
+## Is your plant suitable? Read this first.
+
+Releasing Remote EMS **always** returns a SigenStor to **Self-Consumption**,
+never to the mode that was selected before. This is firmware behaviour, it
+cannot be changed over Modbus — the operational mode has no register at plant
+or device level — and it happens after every commanded slot.
+
+| Your normal mode | Effect |
+|---|---|
+| **Self-Consumption** | none. The revert returns you exactly where you were. **Run it.** |
+| **Sigen AI / TOU / Feed-in** | every slot silently drops you to Self-Consumption until you reset it in the app |
+
+So: if you run Self-Consumption, this is safe to run unattended today. If you
+run Sigen AI, treat it as a supervised tool and expect to reset the mode
+afterwards — or wait until a restore path exists. The only known one is the
+Sigen cloud API, which is unofficial, needs your mySigen password, and whose
+reference implementation has been removed from GitHub.
+
 One site, one agent. The agent is `reconcile.py`; everything here is about
 making sure it can never leave the plant latched.
 
