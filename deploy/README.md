@@ -59,6 +59,40 @@ that does not report leaves the watchdog announcing "nothing held" for a
 plant that may be latched in mode 3, which is worse than no watchdog because
 it reads as reassurance.
 
+## Testing on a Mac laptop? Read this first
+
+A sleeping host is the same as a dead one — it stops polling, stops
+renewing, stops releasing. On a laptop that happens routinely, and macOS
+makes it easy to think you have prevented it when you have not.
+
+`caffeinate -is` is the usual advice, but **`-s` only holds on AC power**, and
+it fails *silently* — no error, the assertion simply is not taken. Measured on
+battery:
+
+```
+$ pmset -g assertions
+PreventSystemSleep          0     <- -s silently absent
+PreventUserIdleSystemSleep  1     <- -i is held
+```
+
+So on battery you get idle-sleep prevention only, and closing the lid still
+suspends the process. Observed: an agent stopped ticking at 22:59 and was
+still frozen at 23:35, mid-schedule.
+
+If you are testing on a Mac:
+
+```sh
+nohup caffeinate -is python3 reconcile.py ... &
+pmset -g assertions | grep PreventSystemSleep   # confirm it says 1
+```
+
+and **keep it plugged in**. The agent detects a suspend after the fact — it
+sleeps against the wall clock, not a countdown, and logs `woke Ns later than
+intended` — but that is forensics, not prevention.
+
+Properly: use hardware that does not sleep. This whole section is a laptop
+problem, and a NAS or Pi does not have it.
+
 ## The three layers of release, and what each one covers
 
 | Layer | Covers | Does not cover |

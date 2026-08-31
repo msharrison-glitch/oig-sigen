@@ -174,6 +174,9 @@ For the cloud path, first create a profile in the mySigen app
 rate, covering as wide a time range as the app allows. The agent uses it as
 an on/off switch — the scheduling lives here, not in the profile.
 
+Testing on a Mac laptop? `caffeinate -s` only holds on AC power and fails
+silently, so on battery it will sleep through slots — see `deploy/README.md`.
+
 `deploy/` has a systemd unit, a cron deadman and a runbook. `Dockerfile` and
 `docker-compose.yml` build a multi-arch image for a NAS or Pi — see
 `deploy/DOCKER.md`, which covers the four things that specifically bite
