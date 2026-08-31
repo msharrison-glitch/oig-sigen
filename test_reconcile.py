@@ -551,8 +551,8 @@ def main() -> int:
 
     rec_c._holding_dispatch = False
     idle_wait = rec_c.sleep_seconds(at(21, 26), [])
-    check("idle waits for the grid, not a free-running timer",
-          round(idle_wait), 1741)
+    check("idle never waits longer than the base poll interval",
+          round(idle_wait), round(reconcile.BASE_POLL_INTERVAL) + 1)
     rec_c._holding_dispatch = True
     held_wait = rec_c.sleep_seconds(at(21, 26), [])
     check("but holding a bonus slot still checks sooner",
@@ -560,9 +560,11 @@ def main() -> int:
 
     print("\nSleeping only until the decision could change")
     rec = reconciler(make_plant(), FakeOctopus([]))
-    check("no events -> waits for the next grid poll (:25 from 22:00)",
+    check("no events -> capped by the base poll, not the 25 min to :25",
           rec.sleep_seconds(now, []),
-          (reconcile.next_poll(now) - now).total_seconds() + 1.0)
+          reconcile.BASE_POLL_INTERVAL + 1.0)
+    check("a new slot appearing is noticed within 5 min",
+          reconcile.BASE_POLL_INTERVAL <= 300.0, True)
     soon = slot_at(now, 3, 60)
     check("an imminent boundary shortens the sleep",
           round(rec.sleep_seconds(now, [soon])), 121)

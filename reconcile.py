@@ -86,12 +86,20 @@ POLL_INTERVAL = 300.0
 # short notice, and every minute we are slow to notice is imported at peak.
 DISPATCH_POLL_INTERVAL = 120.0
 
-# Dispatch data is half-hourly, so poll on that grid rather than on a free-
-# running timer: at :25 and :55, five minutes before each boundary. That is a
-# confirmation poll before anything can start, at 48 calls a day instead of
-# 720 -- which matters for a tool other people will run against Octopus too.
-# Event wakes still fire independently, so punctuality does not depend on it.
+# Two different things need catching, and they need different cadences.
+#
+# Slot BOUNDARIES are half-hourly, so a confirmation poll at :25 and :55 --
+# five minutes before each -- catches them precisely and cheaply.
 POLL_MINUTES = (25, 55)
+
+# New slots APPEAR at arbitrary times. The first dispatch after plugging in
+# starts within a few minutes of the plug going in and runs only to the next
+# half-hour boundary, so waiting for :25 or :55 can miss most of it: plug in
+# at 18:07 for an 18:07-18:30 slot and the aligned poll leaves four usable
+# minutes. Hence a floor on how stale the schedule may be, independent of the
+# grid. 5 minutes is 288 calls a day -- modest for a personal tool, and worth
+# it because that first slot is real money in winter.
+BASE_POLL_INTERVAL = 300.0
 
 # While a slot is live but the car has not yet started drawing, watch closely
 # rather than waiting for the next grid poll. Observed 2026-08-30: the
@@ -728,7 +736,8 @@ class Reconciler:
         # Base cadence is the half-hour grid. The exception is actively
         # holding a bonus slot: a withdrawal mid-charge costs real money, so
         # that case keeps its own faster check.
-        wake = next_poll(now)
+        wake = min(next_poll(now),
+                   now + timedelta(seconds=BASE_POLL_INTERVAL))
         if self._holding_dispatch:
             wake = min(wake, now + timedelta(seconds=DISPATCH_POLL_INTERVAL))
         if self._awaiting_confirmation:

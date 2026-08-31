@@ -168,10 +168,15 @@ watchdog).
 
 ## How it decides
 
-Polls Octopus at `:25` and `:55` — dispatch data is half-hourly, so there's
-nothing to gain from a faster free-running timer. It also wakes on every slot
-boundary, five minutes before a slot opens to re-confirm it still exists, and
-every two minutes while a slot is live.
+Polls Octopus at least every five minutes, and specifically at `:25` and
+`:55` — five minutes before each half-hour boundary — to re-confirm a slot
+still exists before committing to it. It also wakes on every slot boundary,
+and drops to every two minutes while a slot is live.
+
+The five-minute floor matters for one case in particular: the first dispatch
+after you plug in starts within a few minutes of the plug going in and runs
+only to the next half-hour boundary. Waiting for the aligned poll would miss
+most of it.
 
 That churn handling is not theoretical: slots move. One was withdrawn two
 minutes after charging began, and the agent released before the price
