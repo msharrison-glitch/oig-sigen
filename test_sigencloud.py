@@ -78,6 +78,45 @@ def main() -> int:
         check(f"sends {key}", key in h, True)
     check("bearer token attached", h["Authorization"], "Bearer tok")
 
+    print("\nDeadman: a charge selection must not outlive its slot")
+    from datetime import datetime, timedelta, timezone
+    from pathlib import Path as _P
+    sigencloud.CLOUD_STATE = _P("/tmp/.cloud-mode-test.json")
+    sigencloud.clear_cloud_state()
+
+    class FakeCloud:
+        def __init__(self, mode): self.mode = mode; self.sets = []
+        def current_mode(self): return {"currentMode": self.mode}
+        def set_mode(self, m, p=-1):
+            self.sets.append((m, p)); self.mode = m; return {"code": 0}
+
+    fc = FakeCloud(9)
+    check("no state -> nothing to do", sigencloud.deadman(fc), 0)
+    check("and no writes", fc.sets, [])
+
+    future = (datetime.now(timezone.utc) + timedelta(minutes=10)).isoformat()
+    sigencloud.write_cloud_state({"restore_mode": 1, "restore_profile": -1,
+                                  "expires_at": future})
+    sigencloud.deadman(fc)
+    check("a live selection is left alone", fc.sets, [])
+    check("and its state is kept",
+          sigencloud.read_cloud_state() is not None, True)
+
+    past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    sigencloud.write_cloud_state({"restore_mode": 1, "restore_profile": -1,
+                                  "expires_at": past})
+    sigencloud.deadman(fc)
+    check("an expired one is restored", fc.sets, [(1, -1)])
+    check("state cleared afterwards", sigencloud.read_cloud_state(), None)
+
+    fc2 = FakeCloud(1)
+    sigencloud.write_cloud_state({"restore_mode": 1, "restore_profile": -1,
+                                  "expires_at": past})
+    sigencloud.deadman(fc2)
+    check("already in the right mode -> no pointless write", fc2.sets, [])
+    check("but the stale state is tidied",
+          sigencloud.read_cloud_state(), None)
+
     print("\n" + "=" * 62)
     if failures:
         print(f"{len(failures)} FAILED:")

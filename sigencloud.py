@@ -30,13 +30,16 @@ import base64
 import json
 import subprocess
 import sys
+import os
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
 
-from config import ConfigError, load_env
+from datetime import datetime, timezone
+
+from config import ConfigError, load_env, state_path
 
 REGION_BASE_URLS = {
     "eu": "https://api-eu.sigencloud.com/",
@@ -219,6 +222,75 @@ class SigenCloud:
         })
 
 
+# --------------------------------------------------------------------------
+# deadman
+# --------------------------------------------------------------------------
+
+# Written before we switch INTO a charging profile, cleared once we have
+# switched back. Its presence means "a charge profile may be selected"; the
+# deadman restores if it has outlived its slot.
+CLOUD_STATE = state_path(".cloud-mode.json")
+
+
+def write_cloud_state(payload: dict) -> None:
+    tmp = CLOUD_STATE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload, indent=2))
+    os.replace(tmp, CLOUD_STATE)
+
+
+def read_cloud_state() -> dict | None:
+    if not CLOUD_STATE.exists():
+        return None
+    try:
+        return json.loads(CLOUD_STATE.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def clear_cloud_state() -> None:
+    try:
+        CLOUD_STATE.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def deadman(client: "SigenCloud | None" = None) -> int:
+    """Restore the previous mode if a charge selection has outlived its slot.
+
+    The cloud path has no lease and nothing latches at the plant -- but if we
+    select a charging profile and then fail to switch back (API down, token
+    expired, process killed), the plant charges at the profile's rate until
+    someone notices. At 8 kW on peak that is about GBP 2.38 an hour. So the
+    same discipline as the Modbus lease applies: record the intent before
+    acting, and give a separate process enough to clean up.
+
+    Idempotent. Safe to run from cron at any time.
+    """
+    state = read_cloud_state()
+    if not state:
+        return 0
+    expires = state.get("expires_at")
+    if expires and datetime.now(timezone.utc) <= \
+            datetime.fromisoformat(expires):
+        return 0
+    restore_to = state.get("restore_mode")
+    restore_profile = state.get("restore_profile", -1)
+    if restore_to is None:
+        clear_cloud_state()
+        return 0
+    client = client or client_from_env()
+    current = client.current_mode()
+    if current.get("currentMode") == restore_to:
+        # Already back where it belongs; nothing to undo.
+        clear_cloud_state()
+        return 0
+    print(f"DEADMAN: charge selection expired at {expires}; "
+          f"restoring mode {restore_to}")
+    client.set_mode(int(restore_to), int(restore_profile))
+    clear_cloud_state()
+    return 0
+
+
 def client_from_env() -> SigenCloud:
     env = load_env()
     user = env.get("SIGEN_CLOUD_USERNAME", "")
@@ -237,8 +309,13 @@ def main() -> int:
     ap.add_argument("--set", metavar="LABEL",
                     help="select a mode by its label (WRITES)")
     ap.add_argument("--raw", action="store_true")
+    ap.add_argument("--deadman", action="store_true",
+                    help="restore the previous mode if a charge selection "
+                         "has outlived its slot (for cron)")
     args = ap.parse_args()
     try:
+        if args.deadman:
+            return deadman()
         c = client_from_env()
         if args.list or args.set:
             data = c.modes()
