@@ -33,10 +33,15 @@ it's excellent, free, and supports SigenStor.
 
 ## Read this before installing
 
-**The savings track your EV usage, not the calendar.** Bonus slots exist
-because Octopus is charging your car. On a night when the car is nearly full,
-there may be 90 minutes of bonus time; on a night it doesn't charge at all,
-there is none. This is not a flat saving.
+**What you save varies enormously, and winter is when it matters.** Two
+things have to line up: Octopus must be charging your car — no charging, no
+bonus slots — and your battery must have room to put the cheap energy. In a
+UK summer, solar often fills the battery by evening and there is little
+headroom left; in winter it does not, and the same slots become worth several
+times more. Expect most of the benefit between roughly October and March.
+
+This is not a flat saving, and testing it in July will not tell you what it
+is worth in January.
 
 **You may not need this for 23:30–05:30.** That window is guaranteed cheap,
 and most setups already use it — Sigen AI on a profit-focused preference, or
