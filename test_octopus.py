@@ -138,6 +138,31 @@ def main() -> int:
     check("subtracting nothing changes nothing",
           len(O.subtract([_d(30, 14, 0, 30)], [])), 1)
 
+    print("\nA completed dispatch is evidence the car actually charged")
+    from datetime import timezone as _tz
+    base = datetime(2026, 8, 31, 22, 0, tzinfo=_tz.utc)
+    client = O.OctopusClient("k", "A-1")
+
+    def completed(*offsets):
+        client._last_payload = {"completedDispatches": [
+            {"startDt": (base + timedelta(minutes=a)).isoformat(),
+             "endDt": (base + timedelta(minutes=b)).isoformat()}
+            for a, b in offsets]}
+
+    completed()
+    check("nothing completed -> None",
+          client.recent_completion(base), None)
+    completed((-60, -30))
+    check("finished 30 min ago -> counts",
+          client.recent_completion(base) is not None, True)
+    completed((-120, -90))
+    check("finished 90 min ago -> too old",
+          client.recent_completion(base), None)
+    completed((-60, -30), (-30, 0))
+    got = client.recent_completion(base)
+    check("picks the most recent",
+          got.end, base)
+
     print("\n" + "=" * 72)
     if failures:
         print(f"{len(failures)} failure(s):")

@@ -304,6 +304,9 @@ class Reconciler:
         self.cloud = cloud
         self.charge_profile_id = charge_profile_id
         self.cloud_held = False
+        # Confirmation uses the Zappi API when configured (precise), else the
+        # plant's own grid meter (works with any charger).
+        self.confirm_dispatch = False
         # Slots whose dispatch we have SEEN activate, by start time. Once the
         # car has drawn during a slot, Octopus has activated it and the whole
         # window bills off-peak -- so we keep charging for the rest of it even
@@ -525,10 +528,12 @@ class Reconciler:
         # expensive electricity. Requiring the Zappi to be drawing turns the
         # forecast into an observation.
         self._awaiting_confirmation = False
-        if target is not None and self.zappi is not None:
+        if target is not None and self.confirm_dispatch:
             key = target.start.isoformat()
             if key not in self._confirmed:
-                if self._zappi_drawing():
+                drawing = (self._zappi_drawing() if self.zappi is not None
+                           else self._ev_drawing(state))
+                if drawing:
                     self._confirmed.add(key)
                     log.info("DISPATCH ACTIVE: the car is drawing, so this "
                              "slot is really off-peak -- proceeding")
@@ -569,6 +574,36 @@ class Reconciler:
                  action, reason)
         self.send_heartbeat(state, action)
         return action
+
+    def _ev_drawing(self, state: PlantState) -> bool:
+        """Charger-agnostic confirmation, from Octopus's own records.
+
+        The plant's grid meter is NOT usable for this: EV chargers are
+        commonly wired outside the plant's CT precisely so the battery does
+        not chase the car's load, and an agent that watched for a load it can
+        never see would silently never charge.
+
+        A dispatch reaches completedDispatches only if the car actually drew
+        during it, so a completion in the last half hour is evidence the car
+        is charging now. It lags -- hence evidence, not proof -- which is why
+        the poll rate matters and why a slot stays confirmed once seen.
+        """
+        if self.octopus is None:
+            return False
+        try:
+            done = self.octopus.recent_completion()
+        except (OctopusError, OSError) as exc:
+            log.warning("cannot check completed dispatches (%s) -- "
+                        "unconfirmed", exc)
+            return False
+        if done is None:
+            log.info("no dispatch has completed recently -- the car does not "
+                     "appear to be charging")
+            return False
+        log.info("dispatch %s-%s completed: the car is taking charge",
+                 done.local()[0].strftime("%H:%M"),
+                 done.local()[1].strftime("%H:%M"))
+        return True
 
     def _zappi_drawing(self) -> bool:
         """Is the car actually taking charge right now?
@@ -788,11 +823,17 @@ def main() -> int:
     parser.add_argument("--charge-profile", metavar="NAME",
                         help="name of the app profile that grid-charges, "
                              "e.g. 'OIG Charge'")
-    parser.add_argument("--require-zappi", action="store_true",
-                        help="only charge once the Zappi is actually drawing, "
+    parser.add_argument("--require-ev", action="store_true",
+                        help="only charge once the car is actually drawing, "
                              "proving Octopus activated the dispatch. Without "
-                             "this the agent acts on a forecast that may "
-                             "never complete, and would bill at peak")
+                             "it the agent acts on a forecast that may never "
+                             "complete and would bill at peak. Infers this "
+                             "from Octopus's completed dispatches, so it "
+                             "works with ANY charger")
+    parser.add_argument("--require-zappi", action="store_true",
+                        help="as --require-ev, but ask a myenergi Zappi "
+                             "directly rather than inferring from house "
+                             "load. More precise; myenergi only")
     parser.add_argument("--bonus-only", action="store_true",
                         help="command ONLY the extra slots outside "
                              "23:30-05:30. Recommended on a plant running "
@@ -865,6 +906,7 @@ def main() -> int:
                              bonus_only=args.bonus_only,
                              zappi=zappi_client, cloud=cloud_client,
                              charge_profile_id=profile_id)
+            rec.confirm_dispatch = bool(args.require_ev or args.require_zappi)
 
             def on_signal(signum, _frame):
                 log.info("caught signal %d", signum)

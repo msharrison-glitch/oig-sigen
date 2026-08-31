@@ -195,6 +195,7 @@ def main() -> int:
     rec_z = reconcile.Reconciler(client_for(plant_z), FakeOctopus([live]),
                                  5.0, 95.0, bonus_only=True,
                                  zappi=FakeZappi(charging=False, power=0.0))
+    rec_z.confirm_dispatch = True
     plant_z.writes.clear()
     check("car not drawing -> do not charge", rec_z.tick(now), "idle")
     check("and nothing is written", len(plant_z.writes), 0)
@@ -204,6 +205,7 @@ def main() -> int:
     zap = FakeZappi(charging=True)
     rec_y = reconcile.Reconciler(client_for(plant_y), FakeOctopus([live]),
                                  5.0, 95.0, bonus_only=True, zappi=zap)
+    rec_y.confirm_dispatch = True
     check("car drawing -> charge", rec_y.tick(now), "STARTED charging")
     check("mode 3 latched", plant_y.holding[40031], 3)
 
@@ -220,6 +222,7 @@ def main() -> int:
     zap_w = FakeZappi(charging=False, power=0.0)
     rec_w = reconcile.Reconciler(client_for(plant_w), FakeOctopus([live]),
                                  5.0, 95.0, bonus_only=True, zappi=zap_w)
+    rec_w.confirm_dispatch = True
     check("declined while the car is idle", rec_w.tick(now), "idle")
     check("but flagged as worth watching",
           rec_w._awaiting_confirmation, True)
@@ -237,6 +240,7 @@ def main() -> int:
     rec_d = reconcile.Reconciler(client_for(plant_d), FakeOctopus([live]),
                                  5.0, 95.0, bonus_only=True,
                                  zappi=DeadZappi())
+    rec_d.confirm_dispatch = True
     plant_d.writes.clear()
     check("unreachable Zappi -> do not charge", rec_d.tick(now), "idle")
     check("fails closed, writes nothing", len(plant_d.writes), 0)
@@ -262,6 +266,47 @@ def main() -> int:
     rec_p.fetch_slots(now)
     check("the flag is passed through to the client",
           rec_p.octopus.last_bonus_only, True)
+
+    print("\nCharger-agnostic confirmation, from completed dispatches")
+    # The plant's grid meter cannot be used: chargers are commonly wired
+    # outside its CT so the battery does not chase the car. Octopus's own
+    # completion record works whatever the charger is.
+    live_e = slot_at(now, -5, 55, "dispatch")
+
+    class OctopusWithCompletion(FakeOctopus):
+        def __init__(self, slots, completed):
+            super().__init__(slots)
+            self.completed = completed
+        def recent_completion(self, now=None, within_minutes=40.0):
+            return self.completed
+
+    def rec_completion(completed):
+        pl = make_plant(soc_pct=40.0)
+        r = reconcile.Reconciler(
+            client_for(pl), OctopusWithCompletion([live_e], completed),
+            5.0, 95.0, bonus_only=True)
+        r.confirm_dispatch = True
+        return pl, r
+
+    pl1, r1 = rec_completion(None)
+    check("nothing has completed -> car not charging -> decline",
+          r1.tick(now), "idle")
+    check("and nothing written", len(pl1.writes), 0)
+
+    done = slot_at(now, -35, -5, "completed")
+    pl2, r2 = rec_completion(done)
+    check("a recent completion -> the car IS charging -> proceed",
+          r2.tick(now), "STARTED charging")
+
+    class BrokenCompletion(FakeOctopus):
+        def recent_completion(self, now=None, within_minutes=40.0):
+            raise OctopusError("api down")
+    pl3 = make_plant(soc_pct=40.0)
+    r3 = reconcile.Reconciler(client_for(pl3), BrokenCompletion([live_e]),
+                              5.0, 95.0, bonus_only=True)
+    r3.confirm_dispatch = True
+    check("API failure fails closed", r3.tick(now), "idle")
+    check("writes nothing", len(pl3.writes), 0)
 
     print("\nCloud actuation: switch a profile, never take a lease")
     import sigencloud

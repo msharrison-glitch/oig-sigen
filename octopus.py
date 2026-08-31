@@ -256,6 +256,7 @@ class OctopusClient:
         self.api_key = api_key
         self.account_number = account_number
         self.timeout = timeout
+        self._last_payload: dict | None = None
 
     def _post(self, query: str, variables: dict,
               token: str | None = None) -> dict:
@@ -315,6 +316,30 @@ class OctopusClient:
                                   token=self.token(force=True))
             raise
 
+    def recent_completion(self, now: datetime | None = None,
+                          within_minutes: float = 40.0) -> Slot | None:
+        """The most recent dispatch that ACTUALLY RAN, if it was recent.
+
+        A dispatch reaches completedDispatches only if the car drew during
+        it, so this is evidence the car is charging -- from Octopus's own
+        data, with no charger API and no assumption about how the charger is
+        wired. It lags by up to a half hour, which is why it is evidence
+        rather than proof.
+        """
+        now = now or datetime.now(timezone.utc)
+        best = None
+        for entry in (self._last_payload or {}).get("completedDispatches") or []:
+            try:
+                end = _parse_dt(entry["endDt"])
+            except (KeyError, ValueError):
+                continue
+            age = (now - end).total_seconds() / 60
+            if -5 <= age <= within_minutes:
+                slot = Slot(_parse_dt(entry["startDt"]), end, "completed")
+                if best is None or slot.end > best.end:
+                    best = slot
+        return best
+
     def cheap_slots(self, horizon_hours: int = 24,
                     now: datetime | None = None,
                     bonus_only: bool = False) -> list[Slot]:
@@ -327,7 +352,9 @@ class OctopusClient:
         """
         now = now or datetime.now(timezone.utc)
         guaranteed = off_peak_windows(now, horizon_hours)
-        dispatches = parse_dispatches(self.dispatches())
+        payload = self.dispatches()
+        self._last_payload = payload
+        dispatches = parse_dispatches(payload)
         if bonus_only:
             slots = merge(subtract(dispatches, guaranteed))
         else:
