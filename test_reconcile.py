@@ -308,48 +308,79 @@ def main() -> int:
     check("API failure fails closed", r3.tick(now), "idle")
     check("writes nothing", len(pl3.writes), 0)
 
-    print("\nModbus path can restore the mode the firmware reverts")
+    print("\nRestoring the owner's mode is retried until it succeeds")
+    import sigencloud
+    from pathlib import Path as _P2
+    sigencloud.CLOUD_STATE = _P2("/tmp/.cloud-mode-restore-test.json")
+    sigencloud.clear_cloud_state()
 
     class RestoreCloud:
-        def __init__(self, mode=1, fail=False):
-            self.mode, self.sets, self.fail = mode, [], fail
+        def __init__(self, mode=1, profile=-1, fail=0):
+            self.mode, self.profile = mode, profile
+            self.sets, self.fail = [], fail
         def current_mode(self):
-            return {"currentMode": self.mode, "currentProfileId": -1}
+            return {"currentMode": self.mode, "currentProfileId": self.profile}
         def set_mode(self, m, p=-1):
-            if self.fail:
+            if self.fail > 0:
+                self.fail -= 1
                 raise RuntimeError("cloud down")
-            self.sets.append((m, p)); self.mode = m; return {"code": 0}
+            self.sets.append((m, p)); self.mode, self.profile = m, p
+            return {"code": 0}
+        def firmware_revert(self):
+            # What the plant actually does when Remote EMS is released:
+            # drops to Maximum Self-Powered regardless of what was selected.
+            self.mode, self.profile = 0, -1
 
     live_r = slot_at(now, -5, 55, "dispatch")
-    plant_r = make_plant(soc_pct=40.0)
-    rc = RestoreCloud(mode=1)
-    rec_r = reconcile.Reconciler(client_for(plant_r), FakeOctopus([live_r]),
-                                 5.0, 95.0, bonus_only=True)
-    rec_r.cloud_restore_client = rc
-    rec_r.restore_mode_via_cloud = True
-    check("takes a normal Modbus lease", rec_r.tick(now), "STARTED charging")
-    check("captured the mode before the lease",
-          rec_r._mode_before_lease, (1, -1))
-    check("mode 3 latched over Modbus", plant_r.holding[40031], 3)
-    check("no mode written yet", rc.sets, [])
 
+    def modbus_rec(cloud, slots=(live_r,)):
+        pl = make_plant(soc_pct=40.0)
+        r = reconcile.Reconciler(client_for(pl), FakeOctopus(list(slots)),
+                                 5.0, 95.0, bonus_only=True)
+        r.cloud_restore_client = cloud
+        r.restore_mode_via_cloud = True
+        return pl, r
+
+    # Whatever mode was set is what comes back -- including a custom profile.
+    pl, rec_r = modbus_rec(RestoreCloud(mode=9, profile=9664))
+    check("captures mode AND profile before the lease",
+          (rec_r.tick(now), rec_r._mode_before_lease),
+          ("STARTED charging", (9, 9664)))
     rec_r.octopus.slots = []
+    rec_r.cloud_restore_client.firmware_revert()
     check("releases", rec_r.tick(now), "RELEASED")
-    check("and puts the operational mode back", rc.sets, [(1, -1)])
-    check("nothing left to restore", rec_r._mode_before_lease, None)
+    check("restores the custom profile, not a default",
+          rec_r.cloud_restore_client.sets, [(9, 9664)])
+    check("nothing outstanding", sigencloud.pending_restore(), None)
 
-    # A cloud failure must not swallow the warning the owner needs.
-    plant_f = make_plant(soc_pct=40.0)
-    rec_f = reconcile.Reconciler(client_for(plant_f), FakeOctopus([live_r]),
-                                 5.0, 95.0, bonus_only=True)
-    rec_f.cloud_restore_client = RestoreCloud(mode=1, fail=True)
-    rec_f.restore_mode_via_cloud = True
+    # A failed restore is a debt, retried, not a logged shrug.
+    sigencloud.clear_cloud_state()
+    # fails twice: once during the release, once on the retry after it
+    pl2, rec_f = modbus_rec(RestoreCloud(mode=1, fail=2))
     rec_f.tick(now)
     rec_f.octopus.slots = []
-    check("restore failure still releases the plant",
-          rec_f.tick(now), "RELEASED")
-    check("and still flags the revert for the watchdog",
-          rec_f._reverted_at is not None, True)
+    rec_f.cloud_restore_client.firmware_revert()
+    rec_f.tick(now)
+    owed = sigencloud.pending_restore()
+    check("a failed restore is recorded as owed", owed, (1, -1))
+    plant_writes = len(pl2.writes)
+    check("and blocks another lease while outstanding",
+          rec_f.tick(now), "restore outstanding")
+    check("no further plant writes while owing", len(pl2.writes), plant_writes)
+    rec_f.octopus.slots = [live_r]
+    check("next tick pays the debt and resumes",
+          rec_f.tick(now), "STARTED charging")
+    check("debt cleared", sigencloud.pending_restore(), None)
+
+    # If the plant is already on the right mode, do not write pointlessly.
+    sigencloud.clear_cloud_state()
+    sigencloud.record_pending_restore(1, -1)
+    rc = RestoreCloud(mode=1)     # plant already back on 1: nothing to do
+    _, rec_ok = modbus_rec(rc, slots=())
+    rec_ok.tick(now)
+    check("already correct -> no pointless write", rc.sets, [])
+    check("and the debt is cleared", sigencloud.pending_restore(), None)
+    sigencloud.clear_cloud_state()
 
     print("\nCloud actuation: switch a profile, never take a lease")
     import sigencloud

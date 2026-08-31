@@ -436,6 +436,37 @@ class Reconciler:
 
     # -- outputs ---------------------------------------------------------
 
+    def _settle_pending_restore(self) -> bool:
+        """Put back any mode we still owe. True when nothing is outstanding.
+
+        Retried every tick rather than attempted once, because a restore that
+        quietly failed leaves the plant on a mode the owner did not choose.
+        The same record is what lets cron recover it if we die first.
+        """
+        import sigencloud
+        owed = sigencloud.pending_restore()
+        if owed is None:
+            return True
+        mode, profile = owed
+        try:
+            current = self.cloud_restore_client.current_mode()
+            if current.get("currentMode") == mode and \
+                    current.get("currentProfileId", -1) == profile:
+                sigencloud.clear_cloud_state()   # already back; nothing owed
+                self._reverted_at = None
+                return True
+            self.cloud_restore_client.set_mode(mode, profile)
+            log.info("restored operational mode %s (profile %s)",
+                     mode, profile)
+            sigencloud.clear_cloud_state()
+            self._reverted_at = None
+            return True
+        except Exception as exc:                  # noqa: BLE001
+            log.error("still cannot restore operational mode %s (%s) -- the "
+                      "plant is on a mode you did not choose. Retrying; or "
+                      "run: python3 sigencloud.py --deadman", mode, exc)
+            return False
+
     def _cloud_start(self, slot: Slot) -> str:
         """Select the charging profile, recording how to undo it first."""
         if self.cloud_held:
@@ -535,19 +566,15 @@ class Reconciler:
             self.lease.release()
             self.lease = control.Lease(self.client, log=log.info)
             if self.restore_mode_via_cloud and self._mode_before_lease:
+                import sigencloud
                 mode, profile = self._mode_before_lease
-                try:
-                    self.cloud_restore_client.set_mode(int(mode),
-                                                       int(profile))
-                    log.info("restored operational mode %s after release",
-                             mode)
-                    self._mode_before_lease = None
+                # Record the debt BEFORE trying to pay it, so a failure here
+                # -- or the process dying -- still leaves something for the
+                # next tick and for cron to act on.
+                sigencloud.record_pending_restore(int(mode), int(profile))
+                self._mode_before_lease = None
+                if self._settle_pending_restore():
                     return "RELEASED"
-                except Exception as exc:          # noqa: BLE001
-                    log.error("could not restore operational mode (%s) -- "
-                              "the plant is now on Self-Consumption. Run: "
-                              "python3 sigencloud.py --set '<your mode>'",
-                              exc)
             self._reverted_at = utcnow().isoformat()
             log.warning(
                 "MODE REVERTED: releasing Remote EMS has returned this plant "
@@ -571,6 +598,12 @@ class Reconciler:
 
     def tick(self, now: datetime | None = None) -> str:
         now = now or utcnow()
+        if self.restore_mode_via_cloud and not self._settle_pending_restore():
+            # We owe the owner a mode we have not managed to set. Taking
+            # another lease would compound that, so do nothing but keep
+            # trying -- there is no cheap slot worth leaving someone on a
+            # mode they did not choose.
+            return "restore outstanding"
         slots = self.fetch_slots(now)
         self._slots = slots            # reused by sleep_seconds; do NOT refetch
         target = desired_slot(slots, now)
@@ -885,12 +918,13 @@ def main() -> int:
                              "instead of taking a Remote EMS lease. Avoids "
                              "the mode revert entirely; needs "
                              "--charge-profile and SIGEN_CLOUD_* in .env")
-    parser.add_argument("--restore-mode", action="store_true",
-                        help="on the Modbus path, put the operational mode "
-                             "back after each release using the Sigen cloud. "
-                             "Without it, releasing Remote EMS leaves the "
-                             "plant on Self-Consumption. Needs SIGEN_CLOUD_* "
-                             "in .env")
+    parser.add_argument("--no-restore-mode", action="store_true",
+                        help="do NOT put the operational mode back after a "
+                             "Modbus release. Restoring happens by default "
+                             "whenever SIGEN_CLOUD_* is configured, because "
+                             "releasing Remote EMS always leaves the plant on "
+                             "Maximum Self-Powered -- whatever you had "
+                             "selected")
     parser.add_argument("--charge-profile", metavar="NAME",
                         help="name of the app profile that grid-charges, "
                              "e.g. 'OIG Charge'")
@@ -939,9 +973,21 @@ def main() -> int:
         cloud_client = None
         restore_client = None
         profile_id = None
-        if args.restore_mode and not args.via_cloud:
+        if not args.via_cloud and not args.no_restore_mode:
+            # On by default: a release always leaves the plant on a mode the
+            # owner did not choose, so restoring is the norm and declining is
+            # the deliberate act.
             import sigencloud
-            restore_client = sigencloud.client_from_env()
+            try:
+                restore_client = sigencloud.client_from_env()
+            except ConfigError:
+                log.warning(
+                    "NO MODE RESTORE: releasing Remote EMS always leaves this "
+                    "plant on Maximum Self-Powered, whatever you had "
+                    "selected, and there is no Modbus register to undo it. "
+                    "Set SIGEN_CLOUD_* in .env to have it put back "
+                    "automatically, or pass --no-restore-mode to silence "
+                    "this.")
         if args.via_cloud:
             import sigencloud
             if not args.charge_profile:

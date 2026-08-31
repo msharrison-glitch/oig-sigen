@@ -77,9 +77,13 @@ Takes a Remote EMS lease and commands mode 3 (command charging, grid first).
 - Official, documented protocol; no third party in the loop
 - Works on your LAN alone — no internet needed
 - Power set per command (`--kw`)
-- **Releasing Remote EMS always returns the plant to Self-Consumption**, not
-  to the mode you had selected. Sigenergy firmware behaviour; it cannot be
-  undone over Modbus, because the operating mode has no register
+- **Releasing Remote EMS always returns the plant to Maximum Self-Powered**,
+  whatever you had selected — including a custom profile. Sigenergy firmware
+  behaviour, and it cannot be undone over Modbus because the operating mode
+  has no register there. If `SIGEN_CLOUD_*` is set the agent puts your mode
+  back automatically after every release, retrying until it succeeds and
+  refusing to take another slot while it still owes you one. Without those
+  credentials it cannot, and says so at startup
 
 ### Cloud (`--via-cloud`)
 

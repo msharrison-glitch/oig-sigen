@@ -254,6 +254,37 @@ def clear_cloud_state() -> None:
         pass
 
 
+def record_pending_restore(mode: int, profile: int = -1) -> None:
+    """Remember a mode that still has to be put back.
+
+    Written the moment a release leaves the plant on the wrong mode, and only
+    cleared once the restore actually succeeds. That way a transient failure,
+    or the agent dying between release and restore, is recovered by the next
+    tick or by cron -- rather than leaving the owner on a mode they did not
+    choose, with one line in a log they may not be reading.
+    """
+    state = read_cloud_state() or {}
+    state.update({
+        "restore_mode": mode,
+        "restore_profile": profile,
+        "pending_restore": True,
+        # Already overdue: the deadman should act on the next run, not wait.
+        "expires_at": datetime.now(timezone.utc).isoformat(),
+    })
+    write_cloud_state(state)
+
+
+def pending_restore() -> tuple[int, int] | None:
+    """The mode still owed to the owner, if any."""
+    state = read_cloud_state() or {}
+    if not state.get("pending_restore"):
+        return None
+    mode = state.get("restore_mode")
+    if mode is None:
+        return None
+    return int(mode), int(state.get("restore_profile", -1))
+
+
 def deadman(client: "SigenCloud | None" = None) -> int:
     """Restore the previous mode if a charge selection has outlived its slot.
 
