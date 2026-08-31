@@ -300,6 +300,11 @@ class Reconciler:
         # True when a slot is live but the car is not yet drawing: keep
         # watching, because it may start at any moment.
         self._awaiting_confirmation = False
+        # When we last handed control back, and therefore when the plant was
+        # last dropped to Self-Consumption by the firmware. Reported in the
+        # heartbeat so an owner running Sigen AI is TOLD, rather than finding
+        # out the way this one did -- by the battery emptying to the grid.
+        self._reverted_at: str | None = None
         self._slots: list[Slot] = []
         self._known: set[tuple[str, str, str]] | None = None
         self.client = client
@@ -401,6 +406,12 @@ class Reconciler:
                 return "WOULD RELEASE"
             self.lease.release()
             self.lease = control.Lease(self.client, log=log.info)
+            self._reverted_at = utcnow().isoformat()
+            log.warning(
+                "MODE REVERTED: releasing Remote EMS has returned this plant "
+                "to SELF-CONSUMPTION. If you run Sigen AI, TOU or Feed-in, "
+                "reset it in the mySigen app -- it will not come back on its "
+                "own.")
             return "RELEASED"
         if state.enable == 1:
             # Not our lease, but Remote EMS is on and we believe it should
@@ -523,6 +534,7 @@ class Reconciler:
             "enable": state.enable,
             "action": action,
             "slots_known": len(self._slots),
+            "reverted_at": self._reverted_at,
             "agent_version": AGENT_VERSION,
         }
         request = urllib.request.Request(

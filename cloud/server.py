@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS heartbeat (
     lease_held    INTEGER NOT NULL,
     lease_expires TEXT,
     soc           REAL,
+    reverted_at   TEXT,
     mode          INTEGER,
     enable        INTEGER,
     action        TEXT,
@@ -117,18 +118,20 @@ def record(db: sqlite3.Connection, site_id: int, payload: dict) -> None:
     db.execute(
         """INSERT INTO heartbeat
              (site_id, seen_at, lease_held, lease_expires, soc, mode,
-              enable, action, agent_version)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+              enable, action, agent_version, reverted_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(site_id) DO UPDATE SET
              seen_at=excluded.seen_at, lease_held=excluded.lease_held,
              lease_expires=excluded.lease_expires, soc=excluded.soc,
              mode=excluded.mode, enable=excluded.enable,
-             action=excluded.action, agent_version=excluded.agent_version""",
+             action=excluded.action, agent_version=excluded.agent_version,
+             reverted_at=excluded.reverted_at""",
         (site_id, utcnow().isoformat(),
          1 if payload.get("lease_held") else 0,
          payload.get("lease_expires"),
          payload.get("soc"), payload.get("mode"), payload.get("enable"),
-         payload.get("action"), payload.get("agent_version")),
+         payload.get("action"), payload.get("agent_version"),
+         payload.get("reverted_at")),
     )
     db.commit()
 
@@ -157,10 +160,19 @@ def evaluate(db: sqlite3.Connection, now: datetime | None = None) -> list[dict]:
         quiet = now - seen
         held = bool(row["lease_held"])
         if quiet <= STALE_AFTER:
-            out.append({"site": row["name"], "severity": "OK",
-                        "detail": f"last seen {quiet.total_seconds():.0f}s ago"
-                                  + (", holding a lease" if held else ""),
-                        "soc": row["soc"], "lease_held": held})
+            detail = (f"last seen {quiet.total_seconds():.0f}s ago"
+                      + (", holding a lease" if held else ""))
+            severity = "OK"
+            if row["reverted_at"]:
+                # Not an outage, but the owner has to act, so it must not be
+                # buried under a green OK.
+                severity = "ACTION"
+                detail += ("; plant was dropped to Self-Consumption on "
+                           "release -- reset the mode in the app if you run "
+                           "Sigen AI")
+            out.append({"site": row["name"], "severity": severity,
+                        "detail": detail, "soc": row["soc"],
+                        "lease_held": held})
             continue
         if held:
             detail = (f"SILENT for {quiet.total_seconds() / 60:.0f} min WHILE "
@@ -192,6 +204,7 @@ SEVERITY_COLOUR = {
     "WARN": "#8a6100",
     "UNKNOWN": "#5f6368",
     "OK": "#1e6b34",
+    "ACTION": "#8a4b00",
 }
 
 

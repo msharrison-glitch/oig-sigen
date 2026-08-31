@@ -13,8 +13,11 @@ or device level — and it happens after every commanded slot.
 | **Sigen AI / TOU / Feed-in** | every slot silently drops you to Self-Consumption until you reset it in the app |
 
 So: if you run Self-Consumption, this is safe to run unattended today. If you
-run Sigen AI, treat it as a supervised tool and expect to reset the mode
-afterwards — or wait until a restore path exists. The only known one is the
+run Sigen AI, the agent now **tells** you every time — it logs `MODE
+REVERTED` on release and reports it in the heartbeat, and the watchdog shows
+that site as `ACTION` rather than a green `OK` until it next reports clean.
+That turns a silent degradation into a notification, which is the difference
+between usable-with-care and not usable. Expect to reset the mode afterwards — or wait until a restore path exists. The only known one is the
 Sigen cloud API, which is unofficial, needs your mySigen password, and whose
 reference implementation has been removed from GitHub.
 

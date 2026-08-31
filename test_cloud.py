@@ -142,6 +142,21 @@ def main() -> int:
            if r["site"] == "never-seen"][0], "UNKNOWN")
     db.close()
 
+    print("\nA mode revert must not hide under a green OK")
+    db = server.connect(db_path)
+    db.execute("UPDATE heartbeat SET seen_at=?, reverted_at=? WHERE site_id=1",
+               (now.isoformat(), now.isoformat()))
+    db.commit()
+    row = server.evaluate(db, now)[0]
+    check("fresh but reverted -> ACTION, not OK", row["severity"], "ACTION")
+    check("and says what to do",
+          "reset the mode in the app" in row["detail"], True)
+    db.execute("UPDATE heartbeat SET reverted_at=NULL WHERE site_id=1")
+    db.commit()
+    check("no revert -> plain OK",
+          server.evaluate(db, now)[0]["severity"], "OK")
+    db.close()
+
     print("\nEnd to end: a real agent tick reaches the watchdog")
     plant = make_plant(soc_pct=42.0)
     rec = reconcile.Reconciler(
