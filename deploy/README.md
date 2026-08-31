@@ -24,7 +24,19 @@ Prove it before enabling the timer-driven path:
 sudo -u oig sh -c 'cd /opt/oig-sigen && python3 reconcile.py --dry-run --once -v'
 ```
 
+Create `/etc/default/oig-sigen`, owned by `oig`, mode 600:
+
+```sh
+WATCHDOG_URL=https://your-watchdog/v1/heartbeat
+SITE_TOKEN=sig_...
+```
+
 Then `sudo systemctl enable --now oig-sigen`.
+
+The unit will not start without those two set. That is deliberate: an agent
+that does not report leaves the watchdog announcing "nothing held" for a
+plant that may be latched in mode 3, which is worse than no watchdog because
+it reads as reassurance.
 
 ## The three layers of release, and what each one covers
 

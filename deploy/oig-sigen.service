@@ -20,10 +20,24 @@ Type=simple
 User=oig
 Group=oig
 WorkingDirectory=/opt/oig-sigen
-# --bonus-only is not optional on a plant running Sigen AI. Without it the
-# agent commands 23:30-05:30 as well, suspending a working optimiser to
-# duplicate it. The whole point is the bonus slots it cannot see.
-ExecStart=/usr/bin/python3 /opt/oig-sigen/reconcile.py --kw 5 --bonus-only
+# Three flags that are not optional in a real deployment:
+#
+#   --bonus-only    without it the agent commands 23:30-05:30 too, suspending
+#                   a working Sigen AI to duplicate what it already does.
+#   --require-zappi without it the agent acts on plannedDispatches, which is a
+#                   forecast about the car. A slot that never completes bills
+#                   at PEAK, so this buys expensive power while reporting a
+#                   saving.
+#   --heartbeat-url without it the watchdog cannot see a lease. It would
+#                   report WARN ("nothing held") for an agent that died
+#                   holding mode 3 -- worse than no watchdog, because it reads
+#                   as reassurance.
+#
+# Set SITE_TOKEN in /etc/default/oig-sigen (mode 600, owned by oig).
+EnvironmentFile=-/etc/default/oig-sigen
+ExecStart=/usr/bin/python3 /opt/oig-sigen/reconcile.py \
+    --kw 5 --bonus-only --require-zappi \
+    --heartbeat-url ${WATCHDOG_URL} --site-token ${SITE_TOKEN}
 
 # SIGTERM is wired to the release path. Give it room: a release is 5-15 s,
 # and with_retry may take another second or two on a flaky link.
