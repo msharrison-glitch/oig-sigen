@@ -75,6 +75,26 @@ def main() -> int:
     check("unplugged decoded", s["plug"], "EV disconnected")
     check("absent div reads as zero, not None", s["power_kw"], 0.0)
 
+    print("\nAn Octopus dispatch shows as BOOSTING, not charging")
+    # Observed on real hardware: sta=4 while Octopus was charging the car.
+    # Testing only for sta==3 would miss every dispatch.
+    c = stub(zappi.ZappiClient("12345678", "k"),
+             {"zappi": [{"sno": 1, "sta": 4, "zmo": 3, "pst": "C2",
+                         "div": 7320}]})
+    s4 = c.status()
+    check("boosting counts as charging", s4["charging"], True)
+    check("and is named, not '? (4)'", s4["status"], "Boosting")
+    check("power read through", s4["power_kw"], 7.32)
+
+    c = stub(zappi.ZappiClient("12345678", "k"),
+             {"zappi": [{"sno": 1, "sta": 4, "zmo": 3, "pst": "C2"}]})
+    check("boosting with no div field still counts as charging",
+          c.status()["charging"], True)
+
+    c = stub(zappi.ZappiClient("12345678", "k"),
+             {"zappi": [{"sno": 1, "sta": 2, "zmo": 3, "pst": "B1"}]})
+    check("waiting is not charging", c.status()["charging"], False)
+
     print("\nUnknowns are surfaced, never silently swallowed")
     c = stub(zappi.ZappiClient("12345678", "k"),
              {"zappi": [{"sno": 1, "sta": 99, "zmo": 42, "pst": "ZZ"}]})

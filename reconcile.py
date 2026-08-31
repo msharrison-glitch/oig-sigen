@@ -717,6 +717,9 @@ class Reconciler:
         if state is None:
             log.warning("no Zappi on the account -- dispatch unconfirmed")
             return False
+        # state["charging"] now covers Boosting, which is what an Octopus
+        # dispatch actually looks like. The power check stays as insurance
+        # against status codes we have not seen yet.
         drawing = bool(state["charging"]) or (state["power_kw"] or 0) > 0.2
         log.info("Zappi: %s, %s, %.2f kW", state["status"], state["plug"],
                  state["power_kw"] or 0.0)

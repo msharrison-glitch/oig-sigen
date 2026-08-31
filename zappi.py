@@ -57,7 +57,16 @@ DEFAULT_USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
 # Field meanings differ between firmware versions and between community
 # sources, so the parsed view below is best-effort and --raw is authoritative.
 # Reported consistently enough to rely on:
-CHARGE_STATUS = {1: "Paused", 3: "Charging", 5: "Complete"}
+# Observed 2026-08-31: an Octopus dispatch puts the Zappi into status 4,
+# BOOSTING -- not 3. Octopus boosts the charger rather than letting it charge
+# normally, so anything testing only for 3 misses every dispatch, which is
+# precisely the case this module exists to detect.
+CHARGE_STATUS = {1: "Paused", 2: "Waiting", 3: "Charging",
+                 4: "Boosting", 5: "Complete"}
+
+# Statuses that mean the car is taking energy. Boosting is here because that
+# is what an Octopus-driven charge looks like.
+DRAWING_STATUSES = (3, 4)
 ZAPPI_MODE = {1: "Fast", 2: "Eco", 3: "Eco+", 4: "Stopped"}
 PLUG_STATUS = {
     "A": "EV disconnected",
@@ -143,7 +152,7 @@ class ZappiClient:
         watts = z.get("div") or 0
         return {
             "serial": z.get("sno"),
-            "charging": z.get("sta") == 3,
+            "charging": z.get("sta") in DRAWING_STATUSES,
             "status": CHARGE_STATUS.get(z.get("sta"), f"? ({z.get('sta')})"),
             "mode": ZAPPI_MODE.get(z.get("zmo"), f"? ({z.get('zmo')})"),
             "plug": PLUG_STATUS.get(z.get("pst"), z.get("pst")),
