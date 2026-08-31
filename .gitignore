@@ -16,3 +16,6 @@ watch.log
 *.log
 .claude/
 *.pdf
+
+# vendor documentation kept locally for reference, not republished
+sigen-dev.md
