@@ -37,7 +37,7 @@ import urllib.parse
 import urllib.request
 import uuid
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from config import ConfigError, load_env, state_path
 
@@ -254,7 +254,8 @@ def clear_cloud_state() -> None:
         pass
 
 
-def record_pending_restore(mode: int, profile: int = -1) -> None:
+def record_pending_restore(mode: int, profile: int = -1,
+                           expires_in_seconds: float = 0.0) -> None:
     """Remember a mode that still has to be put back.
 
     Written the moment a release leaves the plant on the wrong mode, and only
@@ -268,19 +269,34 @@ def record_pending_restore(mode: int, profile: int = -1) -> None:
         "restore_mode": mode,
         "restore_profile": profile,
         "pending_restore": True,
-        # Already overdue: the deadman should act on the next run, not wait.
-        "expires_at": datetime.now(timezone.utc).isoformat(),
+        # With no lifetime given the record is already overdue, so the
+        # deadman acts on its next run -- that is the "we have just released
+        # and owe a restore" case. A lifetime is passed while a lease is
+        # actually held: the agent rolls it forward each tick, so the deadman
+        # only fires once the agent has stopped doing so.
+        "expires_at": (datetime.now(timezone.utc)
+                       + timedelta(seconds=expires_in_seconds)).isoformat(),
     })
     write_cloud_state(state)
 
 
-def pending_restore() -> tuple[int, int] | None:
-    """The mode still owed to the owner, if any."""
+def pending_restore(now: datetime | None = None) -> tuple[int, int] | None:
+    """The mode still owed to the owner, if any.
+
+    A record whose deadline has not passed is NOT a debt: it is the note an
+    agent leaves while it legitimately holds a lease, rolling the deadline
+    forward each tick. Only once nobody is renewing it -- the agent released,
+    or died -- does it become something to act on.
+    """
     state = read_cloud_state() or {}
     if not state.get("pending_restore"):
         return None
     mode = state.get("restore_mode")
     if mode is None:
+        return None
+    expires = state.get("expires_at")
+    if expires and (now or datetime.now(timezone.utc)) < \
+            datetime.fromisoformat(expires):
         return None
     return int(mode), int(state.get("restore_profile", -1))
 

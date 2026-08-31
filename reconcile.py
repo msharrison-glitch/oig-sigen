@@ -540,6 +540,14 @@ class Reconciler:
             return self._cloud_start(slot)
         if state.is_charging_at(self.charge_kw) and self.lease.held:
             self.lease.renew(LEASE_TTL_MINUTES)
+            if self.restore_mode_via_cloud and self._mode_before_lease:
+                # Roll the restore deadline forward too: alive and renewing,
+                # the deadman stays out of it; dead, it expires and fires.
+                import sigencloud
+                sigencloud.record_pending_restore(
+                    int(self._mode_before_lease[0]),
+                    int(self._mode_before_lease[1]),
+                    expires_in_seconds=LEASE_TTL_MINUTES * 60 + CLOUD_GRACE)
             return "holding"
         if self.dry_run:
             return "WOULD START charging"
@@ -548,9 +556,19 @@ class Reconciler:
             # read it, take the lease anyway and warn: charging cheaply and
             # losing the mode beats not charging, but the owner should know.
             try:
+                import sigencloud
                 before = self.cloud_restore_client.current_mode()
                 self._mode_before_lease = (before.get("currentMode"),
                                            before.get("currentProfileId", -1))
+                # Persist it NOW, not after the release. Held only in memory,
+                # this knowledge dies with the process -- and a dead agent is
+                # exactly when the owner is least likely to notice their plant
+                # sitting on Self-Consumption. Written here, the deadman can
+                # put it back on our behalf.
+                sigencloud.record_pending_restore(
+                    int(self._mode_before_lease[0]),
+                    int(self._mode_before_lease[1]),
+                    expires_in_seconds=LEASE_TTL_MINUTES * 60 + CLOUD_GRACE)
                 log.info("will restore operational mode %s after release",
                          self._mode_before_lease[0])
             except Exception as exc:              # noqa: BLE001
@@ -574,11 +592,10 @@ class Reconciler:
             self.lease.release()
             self.lease = control.Lease(self.client, log=log.info)
             if self.restore_mode_via_cloud and self._mode_before_lease:
+                # The record already exists from when the lease was taken;
+                # make it due NOW so it is a debt rather than a live note.
                 import sigencloud
                 mode, profile = self._mode_before_lease
-                # Record the debt BEFORE trying to pay it, so a failure here
-                # -- or the process dying -- still leaves something for the
-                # next tick and for cron to act on.
                 sigencloud.record_pending_restore(int(mode), int(profile))
                 self._mode_before_lease = None
                 if self._settle_pending_restore():

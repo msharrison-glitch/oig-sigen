@@ -373,6 +373,33 @@ def main() -> int:
           rec_r.cloud_restore_client.sets, [(9, 9664)])
     check("nothing outstanding", sigencloud.pending_restore(), None)
 
+    # The restore must survive the agent dying, so it is recorded when the
+    # lease is TAKEN -- not after a release that may never happen.
+    sigencloud.clear_cloud_state()
+    pl_k, rec_k = modbus_rec(RestoreCloud(mode=9, profile=9664))
+    rec_k.tick(now)
+    st = sigencloud.read_cloud_state()
+    check("mode recorded the moment the lease is taken",
+          (st["restore_mode"], st["restore_profile"]), (9, 9664))
+    check("but not yet a DEBT -- the agent is alive and holding",
+          sigencloud.pending_restore(), None)
+    check("because the record has a live deadline",
+          datetime.fromisoformat(st["expires_at"]) > datetime.now(timezone.utc),
+          True)
+    check("and it becomes a debt once nobody renews it",
+          sigencloud.pending_restore(
+              datetime.now(timezone.utc) + timedelta(hours=1)), (9, 9664))
+    first_deadline = st["expires_at"]
+    rec_k.tick(now)                       # still holding
+    check("and the deadline rolls forward while it holds",
+          sigencloud.read_cloud_state()["expires_at"] >= first_deadline, True)
+    rec_k.octopus.slots = []
+    rec_k.cloud_restore_client.firmware_revert()
+    rec_k.tick(now)
+    check("cleared once the mode is actually back",
+          sigencloud.pending_restore(), None)
+    sigencloud.clear_cloud_state()
+
     # A failed restore is a debt, retried, not a logged shrug.
     sigencloud.clear_cloud_state()
     # fails twice: once during the release, once on the retry after it
