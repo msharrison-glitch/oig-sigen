@@ -11,3 +11,8 @@ __pycache__/
 # observer output
 overnight*.csv
 watch.log
+
+# runtime logs
+*.log
+.claude/
+*.pdf
