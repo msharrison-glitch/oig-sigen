@@ -943,9 +943,11 @@ def main() -> int:
                         help="only charge once the car is actually drawing, "
                              "proving Octopus activated the dispatch. Without "
                              "it the agent acts on a forecast that may never "
-                             "complete and would bill at peak. Infers this "
-                             "from Octopus's completed dispatches, so it "
-                             "works with ANY charger")
+                             "complete and would bill at peak. Works with any "
+                             "charger, using Octopus's completed dispatches "
+                             "-- but those lag, so it cannot confirm the "
+                             "FIRST slot after you plug in. Use "
+                             "--require-zappi instead if you have one")
     parser.add_argument("--require-zappi", action="store_true",
                         help="as --require-ev, but ask a myenergi Zappi "
                              "directly rather than inferring from house "

@@ -57,7 +57,17 @@ mode, your solar and your demand, not on the mode name alone.
 Octopus bills the off-peak rate for dispatches that actually *ran*. A slot in
 `plannedDispatches` that never completes bills at **peak**. Charging on the
 plan alone can buy 29.757p electricity while reporting a saving — so always
-run with `--require-ev` or `--require-zappi`.
+run with one of:
+
+- **`--require-zappi`** — asks a myenergi Zappi directly. No lag, catches
+  every slot including the first one after you plug in. myenergi only.
+- **`--require-ev`** — works with any charger, using Octopus's record of
+  *completed* dispatches. Those lag, so it **cannot confirm the first slot of
+  a charging session** — the short one that appears seconds after you plug
+  in. It picks up from the second slot onward.
+
+No other charger is supported today, and won't be until someone with one can
+test it.
 
 **Choose your actuation path deliberately.** See below; one of them changes
 your inverter's operating mode as a side effect.
