@@ -59,6 +59,53 @@ that does not report leaves the watchdog announcing "nothing held" for a
 plant that may be latched in mode 3, which is worse than no watchdog because
 it reads as reassurance.
 
+## On a Synology NAS
+
+A good host: it does not sleep, it is already on, and the agent is small
+enough not to matter on any model. Two things differ from the systemd route.
+
+**Check the Python version first — this is the usual blocker.** `octopus.py`
+needs `zoneinfo`, so **Python 3.9 or newer**. Synology's own Python 3 package
+on DSM 6.x is 3.8, which is too old. SynoCommunity's Python 3.11 covers DSM
+6.x and 7.x across the ARM and x86 architectures, including older ones like
+`armada370` (DS213j, DS216se).
+
+```sh
+uname -m                # armv7l, x86_64, aarch64 ...
+python3 --version       # must be 3.9+
+openssl version         # only needed for --via-cloud or the mode restore
+```
+
+If `uname -m` reports `armv5tel` (Marvell Kirkwood, pre-2013 models), stop —
+there is no usable Python there.
+
+**No Docker on ARM models.** DSM's Docker/Container Manager package is x86
+only, so ignore the Dockerfile. Copy the `.py` files and `.env` to a share
+and run them directly — being dependency-free, there is nothing else to
+install.
+
+**Use Task Scheduler instead of systemd**, in Control Panel:
+
+| Task | Type | Runs |
+|---|---|---|
+| agent | Triggered Task → Boot-up | `cd /volume1/oig-sigen && nohup python3 reconcile.py --bonus-only --require-ev >/dev/null 2>&1 &` |
+| deadman | Scheduled Task, every 5 min | `cd /volume1/oig-sigen && python3 control.py --deadman` |
+| cloud deadman | Scheduled Task, every 5 min | `cd /volume1/oig-sigen && python3 sigencloud.py --deadman` |
+
+Run them as a user that owns the directory: state lives beside the scripts,
+and a deadman that cannot read `.lease.json` silently protects nothing.
+
+**Networking:** the agent needs to reach the plant on your LAN and
+`api.octopus.energy` outbound. It needs no inbound access at all, so a NAS
+with no port forwarding is a sound place for it — but do not firewall it off
+from the internet entirely, or the schedule poll will simply time out.
+
+**Older DSM is end-of-life** (6.2 stopped getting updates some years ago).
+The agent puts your Octopus API key, and optionally your mySigen password, in
+a file on that machine. With no inbound exposure the risk is small, but it is
+a new class of secret on an unpatched box — worth deciding rather than
+defaulting into. The Modbus-only path needs no Sigen credentials at all.
+
 ## Testing on a Mac laptop? Read this first
 
 A sleeping host is the same as a dead one — it stops polling, stops
