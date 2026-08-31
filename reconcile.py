@@ -598,6 +598,15 @@ class Reconciler:
                 log.error("tick failed (%s) -- releasing and retrying", exc)
                 self.safe_release()
                 slots = []
+            # The plant drops an idle TCP connection long before our next
+            # 30-minute poll, so holding one open just means every tick opens
+            # with a failed call and a retry. Observed overnight: 12 ticks,
+            # 12 identical warnings. Close it deliberately and reconnect on
+            # the next call, which SigenClient does for us.
+            try:
+                self.client.close()
+            except OSError:
+                pass
             delay = self.sleep_seconds(utcnow(), slots)
             log.debug("sleeping %.0fs", delay)
             before = utcnow()
