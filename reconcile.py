@@ -304,6 +304,11 @@ class Reconciler:
         self.cloud = cloud
         self.charge_profile_id = charge_profile_id
         self.cloud_held = False
+        # With Modbus actuation, the cloud client is used only to put the
+        # operational mode back after a release -- the firmware always drops
+        # it to Self-Consumption, and there is no Modbus register for it.
+        self.restore_mode_via_cloud = False
+        self._mode_before_lease: tuple[int, int] | None = None
         # Confirmation uses the Zappi API when configured (precise), else the
         # plant's own grid meter (works with any charger).
         self.confirm_dispatch = False
@@ -470,6 +475,20 @@ class Reconciler:
             return "holding"
         if self.dry_run:
             return "WOULD START charging"
+        if self.restore_mode_via_cloud and self._mode_before_lease is None:
+            # Capture what to put back BEFORE taking the lease. If we cannot
+            # read it, take the lease anyway and warn: charging cheaply and
+            # losing the mode beats not charging, but the owner should know.
+            try:
+                before = self.cloud_restore_client.current_mode()
+                self._mode_before_lease = (before.get("currentMode"),
+                                           before.get("currentProfileId", -1))
+                log.info("will restore operational mode %s after release",
+                         self._mode_before_lease[0])
+            except Exception as exc:              # noqa: BLE001
+                log.warning("cannot read the operational mode (%s) -- the "
+                            "release will revert it and NOT restore", exc)
+
         # Covers both a cold start and a plant that drifted underneath us
         # (someone used the app, or it restarted). acquire() writes the state
         # file before any register, and orders limits -> mode -> enable.
@@ -486,6 +505,20 @@ class Reconciler:
                 return "WOULD RELEASE"
             self.lease.release()
             self.lease = control.Lease(self.client, log=log.info)
+            if self.restore_mode_via_cloud and self._mode_before_lease:
+                mode, profile = self._mode_before_lease
+                try:
+                    self.cloud_restore_client.set_mode(int(mode),
+                                                       int(profile))
+                    log.info("restored operational mode %s after release",
+                             mode)
+                    self._mode_before_lease = None
+                    return "RELEASED"
+                except Exception as exc:          # noqa: BLE001
+                    log.error("could not restore operational mode (%s) -- "
+                              "the plant is now on Self-Consumption. Run: "
+                              "python3 sigencloud.py --set '<your mode>'",
+                              exc)
             self._reverted_at = utcnow().isoformat()
             log.warning(
                 "MODE REVERTED: releasing Remote EMS has returned this plant "
@@ -820,6 +853,12 @@ def main() -> int:
                              "instead of taking a Remote EMS lease. Avoids "
                              "the mode revert entirely; needs "
                              "--charge-profile and SIGEN_CLOUD_* in .env")
+    parser.add_argument("--restore-mode", action="store_true",
+                        help="on the Modbus path, put the operational mode "
+                             "back after each release using the Sigen cloud. "
+                             "Without it, releasing Remote EMS leaves the "
+                             "plant on Self-Consumption. Needs SIGEN_CLOUD_* "
+                             "in .env")
     parser.add_argument("--charge-profile", metavar="NAME",
                         help="name of the app profile that grid-charges, "
                              "e.g. 'OIG Charge'")
@@ -866,7 +905,11 @@ def main() -> int:
     try:
         host = resolve_host(args.host)
         cloud_client = None
+        restore_client = None
         profile_id = None
+        if args.restore_mode and not args.via_cloud:
+            import sigencloud
+            restore_client = sigencloud.client_from_env()
         if args.via_cloud:
             import sigencloud
             if not args.charge_profile:
@@ -907,6 +950,11 @@ def main() -> int:
                              zappi=zappi_client, cloud=cloud_client,
                              charge_profile_id=profile_id)
             rec.confirm_dispatch = bool(args.require_ev or args.require_zappi)
+            if restore_client is not None:
+                rec.cloud_restore_client = restore_client
+                rec.restore_mode_via_cloud = True
+                log.info("operational mode will be restored after each "
+                         "release")
 
             def on_signal(signum, _frame):
                 log.info("caught signal %d", signum)

@@ -308,6 +308,49 @@ def main() -> int:
     check("API failure fails closed", r3.tick(now), "idle")
     check("writes nothing", len(pl3.writes), 0)
 
+    print("\nModbus path can restore the mode the firmware reverts")
+
+    class RestoreCloud:
+        def __init__(self, mode=1, fail=False):
+            self.mode, self.sets, self.fail = mode, [], fail
+        def current_mode(self):
+            return {"currentMode": self.mode, "currentProfileId": -1}
+        def set_mode(self, m, p=-1):
+            if self.fail:
+                raise RuntimeError("cloud down")
+            self.sets.append((m, p)); self.mode = m; return {"code": 0}
+
+    live_r = slot_at(now, -5, 55, "dispatch")
+    plant_r = make_plant(soc_pct=40.0)
+    rc = RestoreCloud(mode=1)
+    rec_r = reconcile.Reconciler(client_for(plant_r), FakeOctopus([live_r]),
+                                 5.0, 95.0, bonus_only=True)
+    rec_r.cloud_restore_client = rc
+    rec_r.restore_mode_via_cloud = True
+    check("takes a normal Modbus lease", rec_r.tick(now), "STARTED charging")
+    check("captured the mode before the lease",
+          rec_r._mode_before_lease, (1, -1))
+    check("mode 3 latched over Modbus", plant_r.holding[40031], 3)
+    check("no mode written yet", rc.sets, [])
+
+    rec_r.octopus.slots = []
+    check("releases", rec_r.tick(now), "RELEASED")
+    check("and puts the operational mode back", rc.sets, [(1, -1)])
+    check("nothing left to restore", rec_r._mode_before_lease, None)
+
+    # A cloud failure must not swallow the warning the owner needs.
+    plant_f = make_plant(soc_pct=40.0)
+    rec_f = reconcile.Reconciler(client_for(plant_f), FakeOctopus([live_r]),
+                                 5.0, 95.0, bonus_only=True)
+    rec_f.cloud_restore_client = RestoreCloud(mode=1, fail=True)
+    rec_f.restore_mode_via_cloud = True
+    rec_f.tick(now)
+    rec_f.octopus.slots = []
+    check("restore failure still releases the plant",
+          rec_f.tick(now), "RELEASED")
+    check("and still flags the revert for the watchdog",
+          rec_f._reverted_at is not None, True)
+
     print("\nCloud actuation: switch a profile, never take a lease")
     import sigencloud
     from pathlib import Path as _P
