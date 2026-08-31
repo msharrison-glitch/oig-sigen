@@ -38,10 +38,22 @@ because Octopus is charging your car. On a night when the car is nearly full,
 there may be 90 minutes of bonus time; on a night it doesn't charge at all,
 there is none. This is not a flat saving.
 
-**You do not need this for 23:30–05:30.** That window is guaranteed and your
-plant's own optimiser almost certainly already uses it. Run with
-`--bonus-only` (the default in the supplied unit file) so the agent leaves it
-alone.
+**Whether you need this for 23:30–05:30 depends entirely on your operating
+mode.** That window is guaranteed cheap, and some modes already exploit it
+while others cannot touch it:
+
+| Your normal mode | Uses 23:30–05:30? | Run with |
+|---|---|---|
+| **Sigen AI** | yes, it grid-charges | `--bonus-only` |
+| **TOU / Time-based**, configured for IOG | yes | `--bonus-only` |
+| **Maximum Self-Powered** | **no — charges from PV only** | **omit `--bonus-only`** |
+| **Fully Fed to Grid** | n/a — it exports | this probably isn't for you |
+
+If you run Maximum Self-Powered, the guaranteed window is worth far more to
+you than the bonus slots: six hours a night at the off-peak rate that your
+plant currently ignores. Omit `--bonus-only` and let the agent charge through
+it. The supplied systemd unit sets `--bonus-only` because it was written for
+a Sigen AI plant — change it to suit yours.
 
 **A planned dispatch is a forecast about your car, not a price guarantee.**
 Octopus bills the off-peak rate for dispatches that actually *ran*. A slot in
@@ -169,7 +181,9 @@ changed.
 
 `--bonus-only` subtracts the guaranteed 23:30–05:30 window from the dispatch
 schedule, so a dispatch straddling the boundary is trimmed rather than
-duplicating what your plant already does.
+duplicating what your plant already does. Without it, the agent treats the
+guaranteed window as chargeable too — which is what you want if your
+operating mode never grid-charges.
 
 ---
 

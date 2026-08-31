@@ -22,8 +22,11 @@ Group=oig
 WorkingDirectory=/opt/oig-sigen
 # Three flags that are not optional in a real deployment:
 #
-#   --bonus-only    without it the agent commands 23:30-05:30 too, suspending
-#                   a working Sigen AI to duplicate what it already does.
+#   --bonus-only    correct ONLY if your operating mode already grid-charges
+#                   during 23:30-05:30 (Sigen AI, or TOU configured for IOG).
+#                   On Maximum Self-Powered, which charges from PV only, drop
+#                   this flag -- otherwise you leave the guaranteed six-hour
+#                   window unused, and it is worth more than the bonus slots.
 #   --require-zappi without it the agent acts on plannedDispatches, which is a
 #                   forecast about the car. A slot that never completes bills
 #                   at PEAK, so this buys expensive power while reporting a
