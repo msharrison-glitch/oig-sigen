@@ -128,6 +128,11 @@ AGENT_VERSION = "1.0"
 # crash the controller is worse than no observer at all.
 HEARTBEAT_TIMEOUT = 5.0
 
+# How long past a slot's end the cloud deadman waits before undoing a
+# charge selection. Long enough that a late tick is not treated as a failure,
+# short enough that a real failure is caught within a few minutes.
+CLOUD_GRACE = 300.0
+
 DEFAULT_CHARGE_KW = 5.0
 SCHEDULE_HORIZON_HOURS = 24
 
@@ -286,11 +291,19 @@ class Reconciler:
                  dry_run: bool = False, heartbeat_url: str | None = None,
                  site_token: str | None = None,
                  bonus_only: bool = False,
-                 zappi: "ZappiClient | None" = None) -> None:
+                 zappi: "ZappiClient | None" = None,
+                 cloud=None, charge_profile_id: int | None = None) -> None:
         self.heartbeat_url = heartbeat_url
         self.site_token = site_token
         self.bonus_only = bonus_only
         self.zappi = zappi
+        # Cloud actuation: switch the plant's own operational mode to a
+        # pre-made charging profile instead of taking a Remote EMS lease.
+        # Nothing latches, and releasing does not revert the work mode --
+        # which is the whole reason this path exists.
+        self.cloud = cloud
+        self.charge_profile_id = charge_profile_id
+        self.cloud_held = False
         # Slots whose dispatch we have SEEN activate, by start time. Once the
         # car has drawn during a slot, Octopus has activated it and the whole
         # window bills off-peak -- so we keep charging for the rest of it even
@@ -386,7 +399,69 @@ class Reconciler:
 
     # -- outputs ---------------------------------------------------------
 
+    def _cloud_start(self, slot: Slot) -> str:
+        """Select the charging profile, recording how to undo it first."""
+        if self.cloud_held:
+            self._cloud_record(slot)          # roll the deadline forward
+            return "holding"
+        if self.dry_run:
+            return "WOULD START charging (cloud)"
+        before = self.cloud.current_mode()
+        restore_mode = before.get("currentMode")
+        restore_profile = before.get("currentProfileId", -1)
+        if restore_mode is None:
+            log.error("cannot read the current mode; refusing to switch "
+                      "without knowing how to switch back")
+            return "idle (mode unreadable)"
+        # State BEFORE the switch, exactly as the Modbus lease does: if we
+        # die between here and the restore, the deadman still knows what to
+        # put back.
+        self._cloud_record(slot, restore_mode, restore_profile)
+        self.cloud.set_mode(9, self.charge_profile_id)
+        self.cloud_held = True
+        log.info("cloud: selected charging profile %s (was mode %s)",
+                 self.charge_profile_id, restore_mode)
+        return "STARTED charging"
+
+    def _cloud_record(self, slot: Slot, mode=None, profile=-1) -> None:
+        import sigencloud
+        existing = sigencloud.read_cloud_state() or {}
+        # Grace past the slot so a tick that runs late does not trip the
+        # deadman while we are still legitimately charging.
+        deadline = slot.end + timedelta(seconds=CLOUD_GRACE)
+        sigencloud.write_cloud_state({
+            "restore_mode": existing.get("restore_mode", mode),
+            "restore_profile": existing.get("restore_profile", profile),
+            "expires_at": deadline.isoformat(),
+            "slot_end": slot.end.isoformat(),
+            "pid": os.getpid(),
+        })
+
+    def _cloud_stop(self) -> str:
+        import sigencloud
+        if not self.cloud_held:
+            return "idle"
+        if self.dry_run:
+            return "WOULD RELEASE (cloud)"
+        state = sigencloud.read_cloud_state() or {}
+        restore = state.get("restore_mode", 1)
+        profile = state.get("restore_profile", -1)
+        try:
+            self.cloud.set_mode(int(restore), int(profile))
+            log.info("cloud: restored mode %s", restore)
+        except Exception as exc:                  # noqa: BLE001
+            # Leave the state file: the deadman must still be able to undo
+            # this, and clearing it would hide the problem.
+            log.error("cloud restore FAILED (%s) -- the plant may still be "
+                      "charging. Run: python3 sigencloud.py --deadman", exc)
+            return "RESTORE FAILED"
+        sigencloud.clear_cloud_state()
+        self.cloud_held = False
+        return "RELEASED"
+
     def ensure_charging(self, slot: Slot, state: PlantState) -> str:
+        if self.cloud is not None:
+            return self._cloud_start(slot)
         if state.is_charging_at(self.charge_kw) and self.lease.held:
             self.lease.renew(LEASE_TTL_MINUTES)
             return "holding"
@@ -401,6 +476,8 @@ class Reconciler:
         return "STARTED charging"
 
     def ensure_released(self, state: PlantState) -> str:
+        if self.cloud is not None:
+            return self._cloud_stop()
         if self.lease.held:
             if self.dry_run:
                 return "WOULD RELEASE"
@@ -703,6 +780,14 @@ def main() -> int:
                         help="log decisions but write no registers")
     parser.add_argument("--no-octopus", action="store_true",
                         help="ignore bonus slots; guaranteed window only")
+    parser.add_argument("--via-cloud", action="store_true",
+                        help="charge by selecting a cloud energy profile "
+                             "instead of taking a Remote EMS lease. Avoids "
+                             "the mode revert entirely; needs "
+                             "--charge-profile and SIGEN_CLOUD_* in .env")
+    parser.add_argument("--charge-profile", metavar="NAME",
+                        help="name of the app profile that grid-charges, "
+                             "e.g. 'OIG Charge'")
     parser.add_argument("--require-zappi", action="store_true",
                         help="only charge once the Zappi is actually drawing, "
                              "proving Octopus activated the dispatch. Without "
@@ -739,6 +824,25 @@ def main() -> int:
 
     try:
         host = resolve_host(args.host)
+        cloud_client = None
+        profile_id = None
+        if args.via_cloud:
+            import sigencloud
+            if not args.charge_profile:
+                log.error("--via-cloud needs --charge-profile NAME")
+                return 2
+            cloud_client = sigencloud.client_from_env()
+            wanted = args.charge_profile.strip().lower()
+            for m in (cloud_client.modes().get("energyProfileItems") or []):
+                if str(m.get("name", "")).strip().lower() == wanted:
+                    profile_id = int(m["profileId"])
+                    break
+            if profile_id is None:
+                log.error("no cloud profile called %r -- run "
+                          "'python3 sigencloud.py --list'", args.charge_profile)
+                return 2
+            log.info("cloud actuation: profile %r is id %s",
+                     args.charge_profile, profile_id)
         zappi_client = None
         if args.require_zappi:
             import zappi as _z
@@ -759,7 +863,8 @@ def main() -> int:
                              heartbeat_url=args.heartbeat_url,
                              site_token=args.site_token,
                              bonus_only=args.bonus_only,
-                             zappi=zappi_client)
+                             zappi=zappi_client, cloud=cloud_client,
+                             charge_profile_id=profile_id)
 
             def on_signal(signum, _frame):
                 log.info("caught signal %d", signum)

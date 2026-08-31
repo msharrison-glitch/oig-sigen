@@ -263,6 +263,64 @@ def main() -> int:
     check("the flag is passed through to the client",
           rec_p.octopus.last_bonus_only, True)
 
+    print("\nCloud actuation: switch a profile, never take a lease")
+    import sigencloud
+    from pathlib import Path as _P
+    sigencloud.CLOUD_STATE = _P("/tmp/.cloud-mode-reconcile-test.json")
+    sigencloud.clear_cloud_state()
+
+    class FakeCloud:
+        def __init__(self, mode=1):
+            self.mode, self.profile, self.sets = mode, -1, []
+        def current_mode(self):
+            return {"currentMode": self.mode, "currentProfileId": self.profile}
+        def set_mode(self, m, p=-1):
+            self.sets.append((m, p)); self.mode, self.profile = m, p
+            return {"code": 0}
+
+    live_c = slot_at(now, -5, 55, "dispatch")
+    plant_c2 = make_plant(soc_pct=40.0)
+    fc = FakeCloud(mode=1)
+    rec_c2 = reconcile.Reconciler(client_for(plant_c2), FakeOctopus([live_c]),
+                                  5.0, 95.0, bonus_only=True, cloud=fc,
+                                  charge_profile_id=9664)
+    plant_c2.writes.clear()
+    check("starts by selecting the profile", rec_c2.tick(now),
+          "STARTED charging")
+    check("switched to mode 9 with the profile", fc.sets, [(9, 9664)])
+    check("NO modbus write -- no lease, nothing latched",
+          len(plant_c2.writes), 0)
+    check("40029 untouched", plant_c2.holding[40029], 0)
+
+    st = sigencloud.read_cloud_state()
+    check("recorded how to undo it BEFORE switching",
+          st["restore_mode"], 1)
+    check("with a deadline past the slot",
+          datetime.fromisoformat(st["expires_at"]) > live_c.end, True)
+
+    fc.sets.clear()
+    check("second tick just holds", rec_c2.tick(now), "holding")
+    check("without switching again", fc.sets, [])
+
+    oct_c2 = rec_c2.octopus
+    oct_c2.slots = []
+    check("slot gone -> restore the previous mode",
+          rec_c2.tick(now), "RELEASED")
+    check("restored to what was there before", fc.sets, [(1, -1)])
+    check("state cleared", sigencloud.read_cloud_state(), None)
+
+    print("\nCloud actuation refuses to switch blind")
+    class BlindCloud(FakeCloud):
+        def current_mode(self): return {}
+    plant_b = make_plant(soc_pct=40.0)
+    bc = BlindCloud()
+    rec_b2 = reconcile.Reconciler(client_for(plant_b), FakeOctopus([live_c]),
+                                  5.0, 95.0, bonus_only=True, cloud=bc,
+                                  charge_profile_id=9664)
+    check("cannot read the mode -> will not switch",
+          rec_b2.tick(now), "idle (mode unreadable)")
+    check("and wrote nothing", bc.sets, [])
+
     print("\nCold start inside a cheap slot")
     plant = make_plant(soc_pct=50.0)
     live = slot_at(now, -5, 55)
