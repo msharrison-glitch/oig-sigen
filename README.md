@@ -6,8 +6,9 @@ schedules your car, billed at the off-peak rate for the whole property.
 
 Your SigenStor has no idea those slots exist. This tells it.
 
-No Home Assistant. No dependencies. About 2,000 lines of standard-library
-Python that runs on anything — a NAS, a Pi, a mini-PC, a spare laptop.
+No Home Assistant. No dependencies. About 3,800 lines of standard-library
+Python, plus 1,700 lines of offline tests, running on anything — a NAS, a Pi,
+a mini-PC, a spare laptop.
 
 ---
 
@@ -164,8 +165,9 @@ the process that set it, so:
 
 Power limits written during a lease are restored on release. They are
 enforced even with Remote EMS disabled, so a limit left behind silently
-throttles the plant — that bug cost the author a day of capped export before
-it was found.
+throttles the plant. A 3 kW limit left behind by a test capped this plant's
+export at 3 kW through an entire evening peak — against a 14.4 kW rating —
+with Remote EMS disabled the whole time.
 
 ---
 
