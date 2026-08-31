@@ -19,3 +19,6 @@ watch.log
 
 # vendor documentation kept locally for reference, not republished
 sigen-dev.md
+
+# working notes -- describes this specific installation
+CLAUDE.md

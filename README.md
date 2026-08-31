@@ -216,9 +216,10 @@ Eight offline test suites, no hardware or credentials required:
 for t in test_*.py; do python3 "$t" || break; done
 ```
 
-Written for one plant and shared in case it's useful. If your setup differs,
-read `CLAUDE.md` — it records what was measured, what was assumed, and
-several things that turned out to be wrong.
+Written for one plant and shared in case it's useful. Your firmware, wiring
+and tariff region may differ — probe before you command, and read the
+comments in `registers.py` and `control.py`, which record what was actually
+measured on hardware rather than what the protocol document claims.
 
 ## Licence
 

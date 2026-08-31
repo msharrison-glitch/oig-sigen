@@ -63,5 +63,6 @@ take the compose file, or add it as a custom container with the volume set.
 
 If the host dies holding a lease, nothing here releases it — the deadman and
 the entrypoint both die with it. That is what the ESS charge cut-off SOC
-backstop is for; see the SOC limits note in CLAUDE.md. Do not run this
+backstop is for; see the SOC cut-off registers in `registers.py`, which are
+deliberately read-only until their ordering is confirmed. Do not run this
 unattended on dedicated hardware until that exists.
