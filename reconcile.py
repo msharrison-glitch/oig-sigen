@@ -387,11 +387,19 @@ class Reconciler:
                      datetime.fromisoformat(end).astimezone(LOCAL_TZ)
                      .strftime("%H:%M"), source)
         for start, end, source in sorted(self._known - current):
-            log.warning("SCHEDULE - WITHDRAWN %s -> %s [%s]",
-                        datetime.fromisoformat(start).astimezone(LOCAL_TZ)
-                        .strftime("%H:%M"),
+            began = datetime.fromisoformat(start)
+            # How far into the slot the withdrawal landed. Negative means it
+            # was pulled before it ever started. Logged because the useful
+            # question -- is a fixed charging delay worth its cost? -- turns
+            # entirely on whether withdrawals cluster early, and one
+            # observation is not evidence.
+            offset = (utcnow() - began).total_seconds() / 60
+            when = (f"{offset:+.1f} min into it" if offset >= 0
+                    else f"{-offset:.1f} min before it started")
+            log.warning("SCHEDULE - WITHDRAWN %s -> %s [%s] -- %s",
+                        began.astimezone(LOCAL_TZ).strftime("%H:%M"),
                         datetime.fromisoformat(end).astimezone(LOCAL_TZ)
-                        .strftime("%H:%M"), source)
+                        .strftime("%H:%M"), source, when)
         self._known = current
 
     def fetch_slots(self, now: datetime) -> list[Slot]:

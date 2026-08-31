@@ -252,6 +252,26 @@ def main() -> int:
     check("no Zappi configured -> old behaviour",
           rec_n.tick(now), "STARTED charging")
 
+    print("\nWithdrawals record HOW FAR into the slot they landed")
+    import logging as _lg, io as _io
+    stream = _io.StringIO()
+    handler = _lg.StreamHandler(stream)
+    reconcile.log.addHandler(handler)
+    _lg.disable(_lg.NOTSET)
+    reconcile.log.setLevel(_lg.INFO)
+
+    rec_o = reconciler(make_plant(), FakeOctopus([]))
+    started = now - timedelta(minutes=4)
+    doomed = Slot(started, started + timedelta(minutes=30), "dispatch")
+    rec_o._note_changes([doomed])          # first poll: nothing to compare
+    rec_o._note_changes([])                # gone
+    logged = stream.getvalue()
+    reconcile.log.removeHandler(handler)
+    _lg.disable(_lg.CRITICAL)
+    check("withdrawal is logged", "WITHDRAWN" in logged, True)
+    check("with how far into the slot it was",
+          "min into it" in logged, True)
+
     print("\nBonus-only refuses to guess when Octopus is down")
     rec_b = reconciler(make_plant(), BrokenOctopus(), )
     rec_b.bonus_only = True
