@@ -42,6 +42,10 @@ Send SIGHUP to re-poll immediately -- useful the moment you plug the car in,
 because that first dispatch starts between the scheduled polls:
 
     kill -HUP $(pgrep -f 'reconcile.py')
+
+(On BusyBox hosts -- a Synology NAS, most embedded Linux -- pgrep -f
+does not match the full command line and silently finds nothing. See
+deploy/synology/repoll.sh for a version that reads /proc directly.)
 """
 
 from __future__ import annotations

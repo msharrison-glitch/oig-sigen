@@ -47,6 +47,22 @@ The next run of the task picks it up and restarts within five minutes.
   sftp subsystem. Use `scp -O`, or pipe: `cat f | ssh nas 'cat > path/f'`.
 - **`ps` and `pgrep -f` are BusyBox** and will not find processes you know are
   running. Trust `systemctl is-active`, not a pgrep.
+
+## Re-polling the moment you plug in
+
+The first dispatch of a session starts within a few minutes of the plug going
+in and runs only to the next half-hour boundary, so it can be most of the way
+over before the agent next looks. SIGHUP cuts the wait short:
+
+    ~/oig-sigen/repoll.sh
+
+The main README gives `kill -HUP $(pgrep -f 'reconcile.py')` for this, which
+does **not** work here -- nor does `systemctl show -p MainPID` (empty on this
+DSM build) or `systemctl kill -s HUP` (needs root). `repoll.sh` finds the pid
+in /proc instead, and signals it as the admin user that owns it.
+
+Verified: SIGHUP at 18:38:50, a fresh schedule poll and plant read completed
+at 18:38:55.
 - **Old DSM needs old crypto** to accept a modern OpenSSH client:
   `ssh -o Ciphers=+aes256-cbc -o HostKeyAlgorithms=+ssh-rsa admin@<nas>`
 
