@@ -1,0 +1,26 @@
+[Unit]
+Description=OIG to SigenStor reconciliation agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=admin
+WorkingDirectory=/var/services/homes/admin/oig-sigen
+ExecStart=/usr/local/bin/python3.9 /var/services/homes/admin/oig-sigen/reconcile.py \
+    --bonus-only --require-zappi \
+    --via-cloud --charge-profile "OIG Charge" \
+    -v --log-file observe.log
+
+# Release is wired to SIGTERM; 5-25s actuation, so give it room before SIGKILL.
+KillSignal=SIGTERM
+TimeoutStopSec=90
+
+# Belt and braces. Idempotent, and a no-op when nothing is held.
+ExecStopPost=/usr/local/bin/python3.9 /var/services/homes/admin/oig-sigen/control.py release
+
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
