@@ -198,6 +198,32 @@ def main() -> int:
           s.start - timedelta(seconds=reconcile.COMMAND_LEAD))
     check("no slots -> no event", reconcile.next_event([], now), None)
 
+    print("\nTelemetry decodes with the right sign and gain")
+    # The status line is how a charge gets diagnosed after the fact, so a
+    # swapped hi/lo word, a wrong gain, or GRID_ACTIVE_POWER mistyped as the
+    # adjacent PLANT_ACTIVE_POWER (30031) would all ship green without this:
+    # the operator would read a wrong-signed number and conclude the battery
+    # was discharging while it charged.
+    plant = make_plant(soc_pct=50.0, grid_kw=2.75, ess_kw=-1.25)
+    st = reconciler(plant, FakeOctopus([])).read_plant()
+    check("grid power decodes positive (importing)", st.grid_kw, 2.75)
+    check("ESS power decodes negative (discharging)", st.ess_kw, -1.25)
+    check("status line signs both", reconcile._kw(st.grid_kw), "+2.75 kW")
+    check("status line marks a discharge", reconcile._kw(st.ess_kw),
+          "-1.25 kW")
+
+    print("\nA telemetry read that fails must not break the tick")
+    # read_plant runs at the top of every tick. If a cosmetic read could
+    # raise, a plant that does not serve 30005/30037 would crash the loop on
+    # every pass -- possibly with a lease held and nothing left to release it.
+    plant = make_plant(soc_pct=50.0)
+    plant.input.pop(30005, None)      # as an unsupporting firmware would
+    plant.input.pop(30006, None)
+    st = reconciler(plant, FakeOctopus([])).read_plant()
+    check("missing grid register -> None, not an exception", st.grid_kw, None)
+    check("the decision-critical reads still land", st.soc, 50.0)
+    check("unreadable telemetry prints as ?", reconcile._kw(st.grid_kw), "?")
+
     print("\nOctopus outage falls back to the guaranteed window")
     rec = reconciler(make_plant(), BrokenOctopus())
     fell_back = rec.fetch_slots(now)

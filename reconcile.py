@@ -24,8 +24,8 @@ Three constraints shape the whole design:
     shuts, so the battery is at setpoint for the whole cheap period and is
     never still importing when the price steps back up.
 
-  * **One second minimum between Modbus requests.** A tick costs ~4 s of
-    wall clock in reads alone. The loop sleeps until the next moment a
+  * **One second minimum between Modbus requests.** A tick costs ~6 s of
+    wall clock in reads alone (six registers). The loop sleeps until the next moment a
     decision could actually change, so it is idle almost all the time.
 
 If Octopus is unreachable the loop falls back to the *guaranteed* 23:30-05:30
@@ -466,7 +466,12 @@ class Reconciler:
         field is not worth that.
         """
         try:
-            value = with_retry(R.read, self.client, reg)
+            # attempts=1 deliberately. The failure this guards against is an
+            # illegal-data-address, which is deterministic -- a retry cannot
+            # succeed, it just costs two more throttled seconds per tick and
+            # emits with_retry's WARNING, which is indistinguishable from the
+            # real transport faults the fail-safe path depends on us noticing.
+            value = with_retry(R.read, self.client, reg, attempts=1)
         except (ModbusError, OSError) as exc:
             log.debug("telemetry read of %d failed (%s)", reg.address, exc)
             return None
@@ -666,8 +671,8 @@ class Reconciler:
         state = self.read_plant()
 
         # Decide on the time it is NOW, not when the tick began. Fetching the
-        # schedule and reading four registers at the 1 s Modbus floor costs
-        # 5-6 s, and deciding on the stale timestamp meant we once held a
+        # schedule and reading six registers at the 1 s Modbus floor costs
+        # 7-8 s, and deciding on the stale timestamp meant we once held a
         # lease two seconds after the deadline we had just printed -- the
         # release then fell to the next poll and ran 40 s late, past the slot
         # boundary and into peak rate. RELEASE_LEAD exists precisely to stop
