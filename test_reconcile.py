@@ -64,14 +64,30 @@ class BrokenOctopus:
         raise OctopusError("simulated API outage")
 
 
+def _s32(kw: float) -> tuple[int, int]:
+    """Split a kW value into the two registers an S32 with gain 1000 uses."""
+    raw = int(round(kw * 1000)) & 0xFFFFFFFF
+    return (raw >> 16) & 0xFFFF, raw & 0xFFFF
+
+
 def make_plant(soc_pct: float = 50.0, enable: int = 0,
-               mode: int = 0) -> MockPlant:
-    """An isolated plant, so tests cannot leak state into each other."""
+               mode: int = 0, grid_kw: float = 0.5,
+               ess_kw: float = -0.3) -> MockPlant:
+    """An isolated plant, so tests cannot leak state into each other.
+
+    grid_kw/ess_kw default to a plausible idle house -- importing a little,
+    battery trickling out -- and are signed, so the log formatting is
+    exercised in both directions rather than only on zero.
+    """
+    grid_hi, grid_lo = _s32(grid_kw)
+    ess_hi, ess_lo = _s32(ess_kw)
     plant = MockPlant(
         holding={40029: enable, 40031: mode,
                  40032: 0, 40033: 0,       # charge limit u32
                  40034: 0, 40035: 0},      # discharge limit u32
-        input_regs={30014: int(soc_pct * 10)},
+        input_regs={30014: int(soc_pct * 10),
+                    30005: grid_hi, 30006: grid_lo,   # grid power s32
+                    30037: ess_hi, 30038: ess_lo},    # ESS power s32
     )
     plant.start()
     return plant

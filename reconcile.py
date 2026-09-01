@@ -282,12 +282,23 @@ class PlantState:
     mode: int
     soc: float | None
     charge_limit_kw: float | None
+    grid_kw: float | None = None      # positive = importing
+    ess_kw: float | None = None       # positive = charging
 
     def is_charging_at(self, kw: float) -> bool:
         return (self.enable == 1
                 and self.mode == R.EMS_COMMAND_CHARGE_GRID_FIRST
                 and self.charge_limit_kw is not None
                 and abs(self.charge_limit_kw - kw) <= LIMIT_TOLERANCE_KW)
+
+
+def _kw(value: float | None) -> str:
+    """Signed kW for the status line, or '?' when the read gave nothing.
+
+    The sign is the whole point: grid positive means importing, ESS positive
+    means charging, so the two together say where the energy is going.
+    """
+    return f"{value:+.2f} kW" if value is not None else "?"
 
 
 def with_retry(fn, *args, attempts: int = 2, **kwargs):
@@ -438,9 +449,28 @@ class Reconciler:
         mode = with_retry(self.client.read_u16, R.REMOTE_EMS_MODE.address)
         soc = with_retry(R.read, self.client, R.ESS_SOC)
         limit = with_retry(R.read, self.client, R.ESS_MAX_CHARGE_LIMIT)
+        grid = self._telemetry(R.GRID_ACTIVE_POWER)
+        ess = self._telemetry(R.ESS_POWER)
         return PlantState(enable, mode,
                           soc if isinstance(soc, (int, float)) else None,
-                          limit if isinstance(limit, (int, float)) else None)
+                          limit if isinstance(limit, (int, float)) else None,
+                          grid, ess)
+
+    def _telemetry(self, reg):
+        """Read a register we only log, never decide on.
+
+        Deliberately swallows a failure. read_plant runs at the top of every
+        tick, so letting a cosmetic read raise would mean a firmware that does
+        not serve this address crashes the loop on every pass -- with a lease
+        possibly held and nothing left running to release it. A missing log
+        field is not worth that.
+        """
+        try:
+            value = with_retry(R.read, self.client, reg)
+        except (ModbusError, OSError) as exc:
+            log.debug("telemetry read of %d failed (%s)", reg.address, exc)
+            return None
+        return value if isinstance(value, (int, float)) else None
 
     # -- outputs ---------------------------------------------------------
 
@@ -698,8 +728,9 @@ class Reconciler:
         else:
             action = self.ensure_released(state)
 
-        log.info("SOC %s  enable=%d mode=%d limit=%s -> %s%s",
+        log.info("SOC %s  grid %s  ESS %s  enable=%d mode=%d limit=%s -> %s%s",
                  f"{state.soc:.1f}%" if state.soc is not None else "?",
+                 _kw(state.grid_kw), _kw(state.ess_kw),
                  state.enable, state.mode,
                  f"{state.charge_limit_kw:.2f} kW"
                  if state.charge_limit_kw is not None else "unset",
