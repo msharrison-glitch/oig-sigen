@@ -877,13 +877,28 @@ class Reconciler:
         return max(1.0, delay + random.uniform(0, POLL_JITTER_SECONDS))
 
     def run(self) -> int:
-        log.info("reconciler started (charge %.2f kW, target SOC %.1f%%, "
-                 "lease TTL %d min%s)", self.charge_kw, self.target_soc,
-                 LEASE_TTL_MINUTES, ", DRY RUN" if self.dry_run else "")
-        if not self.dry_run:
+        # Only announce what is actually in force. On the cloud path the rate
+        # comes from the app profile and there is no lease, so printing
+        # "charge 5.00 kW, lease TTL 15 min" would describe machinery that is
+        # not running. The SOC ceiling is announced either way because it is
+        # applied in tick(), above the split, so it genuinely governs both.
+        dry = ", DRY RUN" if self.dry_run else ""
+        if self.cloud is not None:
+            log.info("reconciler started (charging via cloud profile %s at "
+                     "whatever rate it is configured for, target SOC %.1f%%, "
+                     "no lease%s)",
+                     self.charge_profile_id, self.target_soc, dry)
+        else:
+            log.info("reconciler started (charge %.2f kW, target SOC %.1f%%, "
+                     "lease TTL %d min%s)", self.charge_kw, self.target_soc,
+                     LEASE_TTL_MINUTES, dry)
+        if not self.dry_run and self.cloud is None:
             # Say this every start, because it is the one thing that makes
             # this unsuitable for some plants and it cannot be detected from
             # here -- the operational mode has no Modbus register.
+            #
+            # Not on the cloud path: it never enables Remote EMS at all
+            # (40029 stays 0), so there is no release to revert the mode.
             log.warning(
                 "NOTE: releasing Remote EMS always returns this plant to "
                 "SELF-CONSUMPTION, not to whatever mode was selected before. "
