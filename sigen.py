@@ -53,7 +53,7 @@ class SigenClient:
     """Synchronous Modbus TCP client, rate-limited per the protocol spec.
 
     Usage:
-        with SigenClient("192.168.2.53") as c:
+        with SigenClient("192.168.1.100") as c:
             print(c.read_u16(40031, holding=True))
     """
 

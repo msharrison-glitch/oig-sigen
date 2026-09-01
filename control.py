@@ -20,12 +20,12 @@ would override your own configuration.
 The host may be omitted, in which case SIGEN_HOST from .env is used.
 
 Usage:
-    python3 control.py 192.168.2.53 status
+    python3 control.py 192.168.1.100 status
     python3 control.py status                        (host from .env)
-    python3 control.py 192.168.2.53 standby --minutes 2
-    python3 control.py 192.168.2.53 charge --kw 5 --minutes 10
-    python3 control.py 192.168.2.53 release
-    python3 control.py 192.168.2.53 --deadman        (for cron)
+    python3 control.py 192.168.1.100 standby --minutes 2
+    python3 control.py 192.168.1.100 charge --kw 5 --minutes 10
+    python3 control.py 192.168.1.100 release
+    python3 control.py 192.168.1.100 --deadman        (for cron)
 """
 
 from __future__ import annotations

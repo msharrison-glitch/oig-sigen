@@ -9,7 +9,10 @@ services:
     restart: unless-stopped
     environment:
       TZ: Europe/London
-      SIGEN_HOST: "192.168.2.53"
+      # No default on purpose. A baked-in address would send someone
+      # else's install at whatever sits on that IP on THEIR network --
+      # a confusing timeout instead of "you have not configured this".
+      SIGEN_HOST: "${SIGEN_HOST:?set this to your plant address, e.g. 192.168.1.100}"
       OCTOPUS_API_KEY: "${OCTOPUS_API_KEY:?set this in a .env beside the compose file}"
       OCTOPUS_ACCOUNT_NUMBER: "${OCTOPUS_ACCOUNT_NUMBER:?required}"
     volumes:

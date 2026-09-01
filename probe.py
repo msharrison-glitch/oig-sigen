@@ -12,9 +12,9 @@ command anything, that:
 The host may be omitted, in which case SIGEN_HOST from .env is used.
 
 Usage:
-    python3 probe.py 192.168.2.53
+    python3 probe.py 192.168.1.100
     python3 probe.py                                 (host from .env)
-    python3 probe.py 192.168.2.53 --scan 40020 40060
+    python3 probe.py 192.168.1.100 --scan 40020 40060
 """
 
 from __future__ import annotations

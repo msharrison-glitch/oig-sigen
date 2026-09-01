@@ -82,7 +82,7 @@ def load_env(path: Path = ENV_FILE) -> dict[str, str]:
             f"script or set the variables in the environment:\n"
             f"    OCTOPUS_API_KEY=sk_live_...\n"
             f"    OCTOPUS_ACCOUNT_NUMBER=A-1234ABCD\n"
-            f"    SIGEN_HOST=192.168.2.53"
+            f"    SIGEN_HOST=192.168.1.100"
         )
     return env
 
@@ -122,6 +122,6 @@ def resolve_host(explicit: str | None) -> str:
         raise ConfigError(
             "No host given and SIGEN_HOST is not set in .env. "
             "Pass the plant address on the command line, e.g. "
-            "192.168.2.53"
+            "192.168.1.100"
         )
     return host
