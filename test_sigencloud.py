@@ -15,6 +15,12 @@ import base64
 import subprocess
 
 import sigencloud
+import tempfile
+from pathlib import Path
+
+# Android has no /tmp -- Termux puts it at $PREFIX/tmp -- so the whole
+# suite refused to run on a phone until this stopped being hardcoded.
+_TMP = Path(tempfile.gettempdir())
 
 failures: list[str] = []
 
@@ -81,7 +87,7 @@ def main() -> int:
     print("\nDeadman: a charge selection must not outlive its slot")
     from datetime import datetime, timedelta, timezone
     from pathlib import Path as _P
-    sigencloud.CLOUD_STATE = _P("/tmp/.cloud-mode-test.json")
+    sigencloud.CLOUD_STATE = _TMP / ".cloud-mode-test.json"
     sigencloud.clear_cloud_state()
 
     class FakeCloud:

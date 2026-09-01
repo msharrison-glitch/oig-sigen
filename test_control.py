@@ -15,6 +15,12 @@ import control
 import registers as R
 from sigen import SigenClient
 from test_mock import HOLDING, MockPlant
+import tempfile
+from pathlib import Path
+
+# Android has no /tmp -- Termux puts it at $PREFIX/tmp -- so the whole
+# suite refused to run on a phone until this stopped being hardcoded.
+_TMP = Path(tempfile.gettempdir())
 
 failures: list[str] = []
 
@@ -40,7 +46,7 @@ def main() -> int:
     # Mirror the real plant's observed starting state.
     HOLDING[40029] = 0
     HOLDING[40031] = 0
-    control.STATE_FILE = control.Path("/tmp/.lease-test.json")
+    control.STATE_FILE = _TMP / ".lease-test.json"
     control.clear_state()
 
     print(f"\nMock plant on 127.0.0.1:{plant.port}\n")

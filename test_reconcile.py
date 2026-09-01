@@ -30,6 +30,11 @@ import sigen
 from octopus import OctopusError, Slot
 from sigen import SigenClient
 from test_mock import MockPlant
+import tempfile
+
+# Android has no /tmp -- Termux puts it at $PREFIX/tmp -- so the whole
+# suite refused to run on a phone until this stopped being hardcoded.
+_TMP = Path(tempfile.gettempdir())
 
 failures: list[str] = []
 
@@ -115,7 +120,7 @@ def slot_at(now: datetime, start_min: float, end_min: float,
 def main() -> int:
     logging.disable(logging.CRITICAL)      # keep the loop's chatter out
     sigen.MIN_REQUEST_INTERVAL = 0.0       # the 1 s floor would make this crawl
-    control.STATE_FILE = Path("/tmp/.lease-reconcile-test.json")
+    control.STATE_FILE = _TMP / ".lease-reconcile-test.json"
     control.clear_state()
 
     now = datetime(2026, 1, 15, 22, 0, tzinfo=timezone.utc)
@@ -391,7 +396,7 @@ def main() -> int:
     print("\nRestoring the owner's mode is retried until it succeeds")
     import sigencloud
     from pathlib import Path as _P2
-    sigencloud.CLOUD_STATE = _P2("/tmp/.cloud-mode-restore-test.json")
+    sigencloud.CLOUD_STATE = _TMP / ".cloud-mode-restore-test.json"
     sigencloud.clear_cloud_state()
 
     class RestoreCloud:
@@ -492,7 +497,7 @@ def main() -> int:
     print("\nCloud actuation: switch a profile, never take a lease")
     import sigencloud
     from pathlib import Path as _P
-    sigencloud.CLOUD_STATE = _P("/tmp/.cloud-mode-reconcile-test.json")
+    sigencloud.CLOUD_STATE = _TMP / ".cloud-mode-reconcile-test.json"
     sigencloud.clear_cloud_state()
 
     class FakeCloud:

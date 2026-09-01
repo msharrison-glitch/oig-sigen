@@ -31,6 +31,11 @@ import reconcile          # noqa: E402
 import server             # noqa: E402
 import sigen              # noqa: E402
 from test_reconcile import FakeOctopus, client_for, make_plant  # noqa: E402
+import tempfile
+
+# Android has no /tmp -- Termux puts it at $PREFIX/tmp -- so the whole
+# suite refused to run on a phone until this stopped being hardcoded.
+_TMP = Path(tempfile.gettempdir())
 
 failures: list[str] = []
 
@@ -68,10 +73,10 @@ def get(url, token=None):
 def main() -> int:
     logging.disable(logging.CRITICAL)
     sigen.MIN_REQUEST_INTERVAL = 0.0
-    control.STATE_FILE = Path("/tmp/.lease-cloud-test.json")
+    control.STATE_FILE = _TMP / ".lease-cloud-test.json"
     control.clear_state()
 
-    db_path = Path("/tmp/watchdog-test.db")
+    db_path = _TMP / "watchdog-test.db"
     if db_path.exists():
         db_path.unlink()
 
