@@ -38,14 +38,19 @@ Usage:
     python3 reconcile.py --once             # one pass, then exit
     python3 reconcile.py --kw 5 --log-file /var/log/oig.log
 
-Send SIGHUP to re-poll immediately -- useful the moment you plug the car in,
-because that first dispatch starts between the scheduled polls:
+Ask for an immediate re-poll the moment you plug the car in, because that
+first dispatch starts between the scheduled polls:
 
-    kill -HUP $(pgrep -f 'reconcile.py')
+    python3 reconcile.py --repoll             # works anywhere
+    kill -HUP $(pgrep -f 'reconcile.py')      # Unix, if you can find the pid
 
-(On BusyBox hosts -- a Synology NAS, most embedded Linux -- pgrep -f
-does not match the full command line and silently finds nothing. See
-deploy/synology/repoll.sh for a version that reads /proc directly.)
+--repoll drops a .repoll file beside the other state files and then waits to
+watch the agent eat it, so it can tell you whether anything was actually
+listening. It exists because the signal does not travel: Windows has no
+SIGHUP at all, and on BusyBox hosts -- a Synology NAS, most embedded Linux --
+pgrep -f does not match the full command line, so it silently finds nothing.
+Run it from the same directory and environment as the agent, or the two will
+disagree about where the file lives.
 """
 
 from __future__ import annotations
@@ -66,7 +71,8 @@ from datetime import datetime, timedelta, timezone
 
 import control
 import registers as R
-from config import ConfigError, load_env, poll_seconds, resolve_host
+from config import (ConfigError, load_env, poll_seconds, resolve_host,
+                    state_path)
 from octopus import (LOCAL_TZ, OctopusClient, OctopusError, Slot,
                      merge, off_peak_windows)
 from sigen import ModbusError, SigenClient
@@ -82,6 +88,15 @@ _refresh = False
 # Granularity of the interruptible sleep. Small enough that SIGHUP and
 # SIGTERM feel immediate, large enough to stay idle.
 SLEEP_CHUNK = 5.0
+
+# The portable half of SIGHUP: create this file and the sleep loop re-polls
+# within SLEEP_CHUNK, then deletes it. Beside the other state files, so
+# IOG_STATE_DIR moves it with them.
+REPOLL_FILE = state_path(".repoll")
+
+# Set when the trigger file cannot be deleted. Without this the loop would
+# see it again on every chunk and re-poll forever, hammering Octopus.
+_repoll_broken = False
 
 # Longest a tick may sleep. The schedule is also consulted for nearer events,
 # so this is an upper bound, not a cadence.
@@ -187,6 +202,72 @@ def request_refresh(signum=None, _frame=None) -> None:
     """SIGHUP handler. Sets a flag; the sleep loop picks it up."""
     global _refresh
     _refresh = True
+
+
+def repoll_requested() -> bool:
+    """Has someone asked for a re-poll by creating the trigger file?
+
+    Consumes it, which is also how `--repoll` knows it was heard.
+    """
+    global _repoll_broken
+    if _repoll_broken:
+        return False
+    try:
+        if not REPOLL_FILE.exists():
+            return False
+        REPOLL_FILE.unlink(missing_ok=True)
+    except OSError as exc:
+        # A trigger we cannot delete would fire on every chunk forever, so
+        # stop honouring it rather than spin. Said once, loudly, because the
+        # re-poll silently not working is the whole thing this replaces.
+        _repoll_broken = True
+        log.error("cannot consume the re-poll trigger %s (%s) -- ignoring it "
+                  "for the rest of this run; delete it by hand", REPOLL_FILE,
+                  exc)
+        return False
+    return True
+
+
+def clear_repoll_trigger() -> None:
+    """Drop a trigger left over from a previous run.
+
+    Startup polls anyway, so consuming it here loses nothing and stops the
+    first sleep being cut short for no reason.
+    """
+    try:
+        REPOLL_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass                 # repoll_requested() will report it properly
+
+
+def request_repoll(timeout: float = SLEEP_CHUNK * 2 + 2.0) -> int:
+    """Ask a running agent to re-poll now, and report whether it heard.
+
+    Waiting to watch the file vanish is the point. A trigger that nothing
+    consumes looks exactly like one that worked, and "I told it to look and
+    it quietly did not" is the precise failure this replaces -- BusyBox
+    pgrep finding no pid, or a Windows host with no SIGHUP to send.
+    """
+    try:
+        REPOLL_FILE.touch()
+    except OSError as exc:
+        log.error("cannot create %s: %s", REPOLL_FILE, exc)
+        return 1
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not REPOLL_FILE.exists():
+            log.info("re-poll acknowledged -- the agent is looking now")
+            return 0
+        time.sleep(0.25)
+    try:
+        REPOLL_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+    log.error("nothing consumed %s within %.0f s. Either no agent is "
+              "running, or it is running from a different directory or with "
+              "a different IOG_STATE_DIR and is watching another path.",
+              REPOLL_FILE, timeout)
+    return 1
 
 
 # --------------------------------------------------------------------------
@@ -839,12 +920,13 @@ class Reconciler:
             return False
 
     def _sleep(self, seconds: float) -> None:
-        """Sleep in chunks so SIGHUP can cut it short.
+        """Sleep in chunks so a re-poll request can cut it short.
 
         The first dispatch after plugging in starts a few minutes after the
         plug goes in and runs to the next half-hour boundary, so it lands
-        between scheduled polls. SIGHUP is how you say "I have just plugged
-        in, look now" without waiting for :25 or :55.
+        between scheduled polls. SIGHUP and the .repoll file are both ways to
+        say "I have just plugged in, look now" without waiting for :25 or
+        :55; the file is the one that works on every host.
         """
         global _refresh
         # Against the WALL CLOCK, not a countdown. If the host suspends -- a
@@ -860,6 +942,9 @@ class Reconciler:
             if _refresh:
                 _refresh = False
                 log.info("SIGHUP -- re-polling now")
+                return
+            if repoll_requested():
+                log.info("%s -- re-polling now", REPOLL_FILE.name)
                 return
             time.sleep(min(SLEEP_CHUNK,
                            (deadline - now).total_seconds()))
@@ -914,6 +999,7 @@ class Reconciler:
                 "If your plant runs Self-Consumption anyway, that is a no-op. "
                 "If it runs Sigen AI, every slot will cost you that setting "
                 "until you restore it in the app.")
+        clear_repoll_trigger()
         while True:
             now = utcnow()
             try:
@@ -1103,11 +1189,22 @@ def main() -> int:
                         help="off-box watchdog, e.g. "
                              "https://host/v1/heartbeat")
     parser.add_argument("--site-token", help="bearer token for the watchdog")
+    parser.add_argument("--repoll", action="store_true",
+                        help="tell a running agent to re-poll the schedule "
+                             "NOW and exit. Worth doing the moment you plug "
+                             "the car in: the first dispatch of a session "
+                             "starts between the scheduled polls. Portable "
+                             "where SIGHUP is not")
     parser.add_argument("--log-file")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
     setup_logging(args.log_file, args.verbose)
+
+    if args.repoll:
+        # Deliberately before every other check: it needs no config, no
+        # network and no plant, and it must work when nothing else does.
+        return request_repoll()
 
     if args.kw <= 0:
         log.error("--kw must be positive")
