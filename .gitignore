@@ -1,6 +1,7 @@
 .env
 .lease.json
 .octopus-token.json
+.cloud-mode.json
 __pycache__/
 .DS_Store
 
