@@ -106,6 +106,48 @@ ssh -p 8022 u0_aNNN@<phone-ip> 'chmod 600 ~/oig-sigen/.env'
 
 sshd does not survive a reboot on its own; Termux:Boot can restart it.
 
+## The deadman must outlive Termux
+
+On `--via-cloud` nothing latches at the plant, so a killed agent simply stops
+charging -- but only if it is killed *between* slots. Killed mid-slot, it
+leaves the plant on the charging profile, importing at whatever rate that
+profile allows until something puts the mode back. That something is the
+deadman, and on MIUI it cannot live inside Termux: MIUI does not kill one
+session, it kills the app, so an agent and a deadman sharing a process tree
+die together. A deadman that dies with the thing it guards is not a deadman.
+
+Android's own JobScheduler runs outside the app. `deadman.sh` here is the
+script; register it once:
+
+```sh
+termux-job-scheduler --job-id 0 \
+    --script ~/oig-sigen/deadman.sh \
+    --period-ms 900000 \
+    --persisted true \
+    --battery-not-low false
+```
+
+- **900000 ms is the floor.** Since Android N the minimum period is 15
+  minutes, so the worst-case exposure is longer than a cron-driven host's.
+  Bounded, though: 15 minutes at 12.6 kW is about 3 kWh, or roughly 80p of
+  peak-rate import over off-peak.
+- **`--battery-not-low false` matters.** It defaults to *true*, which would
+  stop the deadman running exactly when the phone is about to die -- the
+  moment it is most needed.
+- **`--persisted true`** survives a reboot. Nothing else on the phone does:
+  `~/.termux/boot` is empty unless you populate it, so the agent itself does
+  not come back after a restart.
+
+Check it with `termux-job-scheduler --pending`.
+
+## Do NOT auto-start the agent while another host runs one
+
+It is tempting to add a second job that restarts `reconcile.py` if it is not
+running -- the equivalent of the supervisor on a NAS. Do not do that until
+this phone is the *only* host running an agent. A supervisor job would
+happily start a second controller behind your back, and the guard in
+`reconcile.py` is a local pid check that cannot see across machines.
+
 ## Two controllers must not run at once
 
 If you already run this on another host, **stop that agent first**. The
