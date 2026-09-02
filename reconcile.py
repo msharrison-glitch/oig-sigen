@@ -964,6 +964,67 @@ class Reconciler:
 # startup
 # --------------------------------------------------------------------------
 
+def _pid_alive_posix(pid: int) -> bool | None:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False         # stale pid, the process is gone
+    except PermissionError:
+        return True          # alive, just not ours to signal
+    except OSError:
+        return None          # cannot tell
+    return True
+
+
+def _pid_alive_windows(pid: int) -> bool | None:
+    import ctypes
+    from ctypes import wintypes
+
+    SYNCHRONIZE = 0x00100000
+    ERROR_ACCESS_DENIED = 5
+    WAIT_TIMEOUT = 0x00000102
+
+    try:
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL,
+                                    wintypes.DWORD)
+        k32.OpenProcess.restype = wintypes.HANDLE
+        k32.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+        k32.WaitForSingleObject.restype = wintypes.DWORD
+        k32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        handle = k32.OpenProcess(SYNCHRONIZE, False, pid)
+        if not handle:
+            # ACCESS_DENIED means it exists and simply is not ours to open --
+            # the same case as EPERM above. Anything else, in practice
+            # ERROR_INVALID_PARAMETER, means there is no such pid.
+            return ctypes.get_last_error() == ERROR_ACCESS_DENIED
+        try:
+            # A handle can outlive the process it names, so opening one is
+            # not proof of life. Waiting zero milliseconds separates them:
+            # a running process times out, an exited one signals at once.
+            return k32.WaitForSingleObject(handle, 0) == WAIT_TIMEOUT
+        finally:
+            k32.CloseHandle(handle)
+    except (OSError, AttributeError, ValueError):
+        return None
+
+
+def pid_alive(pid: int) -> bool | None:
+    """Is that pid a live process? None if the platform will not say.
+
+    os.kill(pid, 0) is the Unix idiom -- signal 0 is checked for permission
+    and then delivered to nothing. On Windows os.kill means something else
+    entirely: CPython implements it as TerminateProcess, so asking the
+    question KILLS the process being asked about, ProcessLookupError is
+    never raised, and Windows recycles pids fast enough that a stale
+    .lease.json could aim that at something unrelated. Hence a real branch
+    rather than a portable-looking one-liner.
+    """
+    if sys.platform == "win32":
+        return _pid_alive_windows(pid)
+    return _pid_alive_posix(pid)
+
+
 def another_controller_running() -> int | None:
     """A live pid in the lease file that is not us means two controllers."""
     state = control.read_state()
@@ -972,15 +1033,9 @@ def another_controller_running() -> int | None:
     pid = state.get("pid")
     if not isinstance(pid, int) or pid == os.getpid():
         return None
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return None          # stale pid, the process is gone
-    except PermissionError:
-        return pid           # alive, just not ours to signal
-    except OSError:
-        return None
-    return pid
+    # "Cannot tell" reads as "not running", as it always has: a lease file we
+    # are unable to interpret must not lock the agent out permanently.
+    return pid if pid_alive(pid) else None
 
 
 def setup_logging(path: str | None, verbose: bool) -> None:

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -637,11 +638,52 @@ def main() -> int:
                          datetime.now(timezone.utc).isoformat()})
     check("a dead pid is not a conflict",
           reconcile.another_controller_running(), None)
-    control.write_state({"pid": 1, "expires_at":
+    # pid 1 is init on Unix and pid 4 is the System process on Windows:
+    # both are alive, and both refuse an ordinary user -- which is exactly
+    # the case that must read as "alive", never as "gone".
+    foreign = 4 if sys.platform == "win32" else 1
+    control.write_state({"pid": foreign, "expires_at":
                          datetime.now(timezone.utc).isoformat()})
     check("a live foreign pid is a conflict (EPERM still means alive)",
-          reconcile.another_controller_running(), 1)
+          reconcile.another_controller_running(), foreign)
     control.clear_state()
+
+    print("\nThe pid check must never kill what it is checking")
+    check("our own process reads as alive",
+          reconcile.pid_alive(os.getpid()), True)
+    check("a pid that cannot exist reads as dead",
+          reconcile.pid_alive(999_999_999), False)
+    # The bug this pins down: os.kill(pid, 0) is a *test* on Unix and
+    # TerminateProcess on Windows, so on Windows the liveness check would
+    # kill the agent it is asking about -- or, with pids recycled, whatever
+    # now holds that number. The branch must never reach os.kill there.
+    saved_platform, saved_kill = sys.platform, os.kill
+    saved_windows = reconcile._pid_alive_windows
+    terminated: list[tuple] = []
+    try:
+        sys.platform = "win32"
+        os.kill = lambda *a: terminated.append(a)   # TerminateProcess, really
+        reconcile._pid_alive_windows = lambda pid: "asked windows"
+        check("on Windows the question goes to the Windows branch",
+              reconcile.pid_alive(4321), "asked windows")
+        check("and os.kill is never reached", terminated, [])
+    finally:
+        sys.platform = saved_platform
+        os.kill = saved_kill
+        reconcile._pid_alive_windows = saved_windows
+
+    # "Cannot tell" fails OPEN on purpose -- a lease file we are unable to
+    # interpret must not lock the agent out for ever -- so pin the direction.
+    saved_alive = reconcile.pid_alive
+    control.write_state({"pid": 424_242, "expires_at":
+                         datetime.now(timezone.utc).isoformat()})
+    try:
+        reconcile.pid_alive = lambda _pid: None
+        check("a pid we cannot ask about does not block startup",
+              reconcile.another_controller_running(), None)
+    finally:
+        reconcile.pid_alive = saved_alive
+        control.clear_state()
 
     print("\nThe schedule churns overnight, so poll and notice")
     plant_c = make_plant(soc_pct=50.0)
