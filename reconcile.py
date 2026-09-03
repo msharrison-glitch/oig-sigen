@@ -383,7 +383,7 @@ class Reconciler:
 
     # -- inputs ----------------------------------------------------------
 
-    def _note_changes(self, slots: list[Slot]) -> None:
+    def _note_changes(self, slots: list[Slot], now: datetime) -> None:
         """Log what moved since the last poll.
 
         Octopus revises the dispatch schedule through the night. A slot that
@@ -403,18 +403,30 @@ class Reconciler:
                      .strftime("%H:%M"), source)
         for start, end, source in sorted(self._known - current):
             began = datetime.fromisoformat(start)
+            finished = datetime.fromisoformat(end)
+            span = (began.astimezone(LOCAL_TZ).strftime("%H:%M"),
+                    finished.astimezone(LOCAL_TZ).strftime("%H:%M"))
+            if finished <= now:
+                # Not a withdrawal. The slot ran to its end and Octopus has
+                # simply dropped the spent dispatch from plannedDispatches.
+                # Observed 2026-09-02: a slot released cleanly at 22:59:42
+                # was reported five minutes later as "WITHDRAWN -- +51.8 min
+                # into it", which is past the end of a 47-minute slot. A
+                # warning about a loss that never happened is worse than
+                # silence, because this log is read after the fact and the
+                # withdrawals in it are meant to be the expensive ones.
+                log.info("SCHEDULE   ended   %s -> %s [%s]", *span, source)
+                continue
             # How far into the slot the withdrawal landed. Negative means it
             # was pulled before it ever started. Logged because the useful
             # question -- is a fixed charging delay worth its cost? -- turns
             # entirely on whether withdrawals cluster early, and one
             # observation is not evidence.
-            offset = (utcnow() - began).total_seconds() / 60
+            offset = (now - began).total_seconds() / 60
             when = (f"{offset:+.1f} min into it" if offset >= 0
                     else f"{-offset:.1f} min before it started")
             log.warning("SCHEDULE - WITHDRAWN %s -> %s [%s] -- %s",
-                        began.astimezone(LOCAL_TZ).strftime("%H:%M"),
-                        datetime.fromisoformat(end).astimezone(LOCAL_TZ)
-                        .strftime("%H:%M"), source, when)
+                        *span, source, when)
         self._known = current
 
     def fetch_slots(self, now: datetime) -> list[Slot]:
@@ -430,7 +442,7 @@ class Reconciler:
             slots = self.octopus.cheap_slots(SCHEDULE_HORIZON_HOURS, now,
                                              self.bonus_only)
             self._last_source = "octopus"
-            self._note_changes(slots)
+            self._note_changes(slots, now)
             return slots
         except (OctopusError, OSError) as exc:
             # Conservative on purpose: we keep the window we can prove and

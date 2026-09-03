@@ -328,8 +328,8 @@ def main() -> int:
     rec_o = reconciler(make_plant(), FakeOctopus([]))
     started = now - timedelta(minutes=4)
     doomed = Slot(started, started + timedelta(minutes=30), "dispatch")
-    rec_o._note_changes([doomed])          # first poll: nothing to compare
-    rec_o._note_changes([])                # gone
+    rec_o._note_changes([doomed], now)     # first poll: nothing to compare
+    rec_o._note_changes([], now)           # gone
     logged = stream.getvalue()
     reconcile.log.removeHandler(handler)
     _lg.disable(_lg.CRITICAL)
@@ -728,6 +728,42 @@ def main() -> int:
     check("holding a bonus slot polls harder",
           rec.sleep_seconds(now, []) <= reconcile.DISPATCH_POLL_INTERVAL
           + reconcile.POLL_JITTER_SECONDS + 1, True)
+
+    print("\nA spent slot is not a withdrawal")
+    spent = slot_at(now, -60, -10, "dispatch")   # ran and finished
+    live = slot_at(now, -10, 50, "dispatch")     # started, still running
+    seen: list[tuple[int, str]] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            seen.append((record.levelno, record.getMessage()))
+
+    handler = _Capture()
+    reconcile.log.addHandler(handler)
+    logging.disable(logging.NOTSET)
+    try:
+        rec = reconciler(make_plant(), FakeOctopus([]))
+        rec._known = None
+        rec._note_changes([spent, live], now)  # first poll: just a baseline
+        seen.clear()
+        rec._note_changes([], now)             # both gone from the schedule
+    finally:
+        logging.disable(logging.CRITICAL)
+        reconcile.log.removeHandler(handler)
+
+    warnings = [m for lvl, m in seen if lvl >= logging.WARNING]
+    infos = [m for lvl, m in seen if lvl < logging.WARNING]
+    check("exactly one warning, for the slot that was still live",
+          len(warnings), 1)
+    check("and it is the withdrawal",
+          warnings[0].startswith("SCHEDULE - WITHDRAWN") if warnings else None,
+          True)
+    check("a slot past its end is not warned about",
+          any("WITHDRAWN" in m for m in infos), False)
+    check("it is recorded as ended instead",
+          sum("SCHEDULE   ended" in m for m in infos), 1)
+    check("no bogus '+N min into it' for a slot that already finished",
+          any("into it" in m for m in infos), False)
 
     print("\n" + "=" * 72)
     if failures:
