@@ -138,7 +138,8 @@ class SigenCloud:
         return headers
 
     def _call(self, method: str, path: str, *, body=None, form=None,
-              basic: tuple[str, str] | None = None) -> dict:
+              basic: tuple[str, str] | None = None,
+              _reauth: bool = True) -> dict:
         url = self.base + path
         if form is not None:
             data = urllib.parse.urlencode(form).encode()
@@ -162,6 +163,23 @@ class SigenCloud:
                     "Sigen cloud rejected the credentials. Check "
                     "SIGEN_CLOUD_USERNAME and SIGEN_CLOUD_PASSWORD are your "
                     f"mySigen app login. ({detail!r})")
+            # 424 is what this API returns for an EXPIRED token, not a bad
+            # one -- the body reads "user credentials have expired". The
+            # token lasts about a day, so any agent that stays up overnight
+            # meets this. Treating it as fatal killed the agent mid-slot on
+            # 2026-09-03, after it had already switched the plant, which is
+            # the worst possible moment. Re-authenticate once and retry.
+            #
+            # `basic` marks the login call itself: retrying that would
+            # recurse. `_reauth` bounds it to one attempt, so a genuinely
+            # broken credential still fails instead of looping.
+            if exc.code == 424 and _reauth and basic is None:
+                print(f"sigencloud: token expired ({detail!r:.60}), "
+                      "re-authenticating", file=sys.stderr, flush=True)
+                self.token = None
+                self.login()
+                return self._call(method, path, body=body, form=form,
+                                  basic=basic, _reauth=False)
             raise SigenCloudError(f"HTTP {exc.code}: {detail!r}")
         except urllib.error.URLError as exc:
             raise SigenCloudError(f"cannot reach {url}: {exc.reason}")
@@ -174,7 +192,7 @@ class SigenCloud:
     # -- session ----------------------------------------------------------
 
     def login(self) -> None:
-        payload = self._call("POST", "auth/oauth/token", form={
+        payload = self._call("POST", "auth/oauth/token", _reauth=False, form={
             "scope": "server",
             "grant_type": "password",
             "userDeviceId": self.user_device_id,

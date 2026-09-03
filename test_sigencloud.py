@@ -123,6 +123,81 @@ def main() -> int:
     check("but the stale state is tidied",
           sigencloud.read_cloud_state(), None)
 
+    print("\nAn expired token re-authenticates instead of killing the agent")
+    # 2026-09-03: after ~24 h up, the API answered 424 "user credentials have
+    # expired". _call raised, nothing caught it, and the agent died mid-slot
+    # having already switched the plant -- the worst possible moment.
+    import io, urllib.error, urllib.request
+
+    class Recorder:
+        """Answers 424 once, then succeeds. Counts the logins it sees."""
+        def __init__(self):
+            self.calls, self.logins, self.expired_once = [], 0, False
+
+        def __call__(self, request, timeout=None):
+            url = request.full_url
+            self.calls.append(url)
+            if url.endswith("auth/oauth/token"):
+                self.logins += 1
+                return _resp({"code": 0, "data": {"access_token": "fresh"}})
+            if not self.expired_once:
+                self.expired_once = True
+                raise urllib.error.HTTPError(
+                    url, 424, "Failed Dependency", {},
+                    io.BytesIO(b'{"code":1,"msg":"expired"}'))
+            return _resp({"code": 0, "data": {"ok": True}})
+
+    class _resp:
+        def __init__(self, payload):
+            import json
+            self._b = json.dumps(payload).encode()
+        def read(self): return self._b
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    rec = Recorder()
+    real_urlopen = urllib.request.urlopen
+    urllib.request.urlopen = rec
+    try:
+        c = sigencloud.SigenCloud("u@example.com", "pw", region="eu")
+        c.token = "stale"
+        out = c._call("GET", "device/owner/station/home")
+    finally:
+        urllib.request.urlopen = real_urlopen
+
+    check("the call succeeds rather than raising", out.get("data"), {"ok": True})
+    check("it re-authenticated exactly once", rec.logins, 1)
+    check("and retried the original path",
+          rec.calls[-1].endswith("device/owner/station/home"), True)
+    check("the fresh token replaced the stale one", c.token, "fresh")
+
+    print("\nBut a broken credential still fails, rather than looping")
+    class AlwaysExpired(Recorder):
+        def __call__(self, request, timeout=None):
+            url = request.full_url
+            self.calls.append(url)
+            if url.endswith("auth/oauth/token"):
+                self.logins += 1
+                return _resp({"code": 0, "data": {"access_token": "fresh"}})
+            raise urllib.error.HTTPError(
+                url, 424, "Failed Dependency", {},
+                io.BytesIO(b'{"code":1,"msg":"expired"}'))
+
+    rec2 = AlwaysExpired()
+    urllib.request.urlopen = rec2
+    try:
+        c2 = sigencloud.SigenCloud("u@example.com", "pw", region="eu")
+        c2.token = "stale"
+        try:
+            c2._call("GET", "device/owner/station/home")
+            raised = False
+        except sigencloud.SigenCloudError:
+            raised = True
+    finally:
+        urllib.request.urlopen = real_urlopen
+    check("raises rather than retrying forever", raised, True)
+    check("having tried the login only once", rec2.logins, 1)
+
     print("\n" + "=" * 62)
     if failures:
         print(f"{len(failures)} FAILED:")

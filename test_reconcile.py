@@ -540,6 +540,34 @@ def main() -> int:
     check("restored to what was there before", fc.sets, [(1, -1)])
     check("state cleared", sigencloud.read_cloud_state(), None)
 
+    print("\nA crash-restart must not record the charge profile as its own restore")
+    # 2026-09-03: an expired cloud token killed the agent AFTER it had
+    # switched the plant. The restart read "currently on profile 9664" as the
+    # owner's own setting and recorded it as the restore target, so the
+    # release would have put the plant back INTO charging at peak rate.
+    sigencloud.clear_cloud_state()
+    plant_x = make_plant(soc_pct=40.0)
+    xc = FakeCloud(mode=9)
+    xc.profile = 9664                      # already on OUR charge profile
+    rec_x = reconcile.Reconciler(client_for(plant_x), FakeOctopus([live_c]),
+                                 5.0, 95.0, bonus_only=True, cloud=xc,
+                                 charge_profile_id=9664)
+    check("still charges -- the slot is real", rec_x.tick(now),
+          "STARTED charging")
+    stx = sigencloud.read_cloud_state()
+    check("does NOT record the charge profile as the restore target",
+          stx["restore_mode"] == 9 and stx["restore_profile"] == 9664, False)
+    check("records the safe default instead",
+          (stx["restore_mode"], stx["restore_profile"]),
+          (reconcile.DEFAULT_RESTORE_MODE, -1))
+    xc.sets.clear()
+    rec_x.octopus.slots = []
+    check("and the release puts the plant on that, not on charging",
+          rec_x.tick(now), "RELEASED")
+    check("restored away from the charge profile",
+          xc.sets, [(reconcile.DEFAULT_RESTORE_MODE, -1)])
+    sigencloud.clear_cloud_state()
+
     print("\nCloud actuation refuses to switch blind")
     class BlindCloud(FakeCloud):
         def current_mode(self): return {}

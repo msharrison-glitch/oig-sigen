@@ -150,6 +150,12 @@ RELEASE_LEAD = 30.0
 # comfortably above the renewal cadence so a slow tick never lets it lapse.
 LEASE_TTL_MINUTES = 15
 
+# What to put the plant back on when we have no better answer. 1 is Sigen AI,
+# which is what this project assumes the owner runs -- the whole point is to
+# patch one blind spot in it, not to replace it. Owners on another mode should
+# change this.
+DEFAULT_RESTORE_MODE = 1
+
 # Below this there is no point actuating at all -- the command would barely
 # have taken effect before it was withdrawn.
 MIN_SLOT_SECONDS = 120.0
@@ -540,6 +546,20 @@ class Reconciler:
             log.error("cannot read the current mode; refusing to switch "
                       "without knowing how to switch back")
             return "idle (mode unreadable)"
+        if restore_profile == self.charge_profile_id:
+            # Finding the plant already on OUR charging profile is never the
+            # owner's own selection: it means a previous run switched it and
+            # then died before restoring. Recording it would make the release
+            # "restore" the plant INTO charging, at peak rate, and the
+            # deadman would agree with it. Observed 2026-09-03, when an
+            # expired cloud token killed the agent mid-slot; the restart
+            # wrote restore_mode 9 / profile 9664 and would have left the
+            # plant importing 11.4 kW past the slot.
+            log.error("plant is already on charge profile %s -- a previous "
+                      "run died mid-slot. Recording mode %d as the restore "
+                      "target instead, NOT the charge profile.",
+                      self.charge_profile_id, DEFAULT_RESTORE_MODE)
+            restore_mode, restore_profile = DEFAULT_RESTORE_MODE, -1
         # State BEFORE the switch, exactly as the Modbus lease does: if we
         # die between here and the restore, the deadman still knows what to
         # put back.
@@ -571,7 +591,7 @@ class Reconciler:
         if self.dry_run:
             return "WOULD RELEASE (cloud)"
         state = sigencloud.read_cloud_state() or {}
-        restore = state.get("restore_mode", 1)
+        restore = state.get("restore_mode", DEFAULT_RESTORE_MODE)
         profile = state.get("restore_profile", -1)
         try:
             self.cloud.set_mode(int(restore), int(profile))
