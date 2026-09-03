@@ -120,6 +120,16 @@ def slot_at(now: datetime, start_min: float, end_min: float,
 def main() -> int:
     logging.disable(logging.CRITICAL)      # keep the loop's chatter out
     sigen.MIN_REQUEST_INTERVAL = 0.0       # the 1 s floor would make this crawl
+    # .env may tune the poll cadences, and on a host where an owner has done
+    # that the suite would go red for a reason with nothing to do with
+    # safety -- which is the worst outcome for a check whose whole job is to
+    # be run before touching the plant. Pin them, as the clock and the state
+    # file are pinned. Observed 2026-09-03: IOG_POLL_IDLE_SECONDS=90 on the
+    # phone failed "an imminent boundary shortens the sleep", because at a
+    # 90 s base cadence a 120 s confirmation wake shortens nothing.
+    reconcile.BASE_POLL_INTERVAL = 300.0
+    reconcile.DISPATCH_POLL_INTERVAL = 30.0
+    reconcile.CONFIRM_POLL_INTERVAL = 30.0
     control.STATE_FILE = _TMP / ".lease-reconcile-test.json"
     control.clear_state()
 
