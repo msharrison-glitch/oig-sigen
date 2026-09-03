@@ -62,49 +62,44 @@ it reads as reassurance.
 ## On a Synology NAS
 
 A good host: it does not sleep, it is already on, and the agent is small
-enough not to matter on any model. Two things differ from the systemd route.
+enough not to matter on any model. It differs enough from the systemd route
+to have its own document — requirements, the supervisor, the Task Scheduler
+alternative, and how to stop it again — in
+[`synology/README.md`](synology/README.md).
 
-**Check the Python version first — this is the usual blocker.** `octopus.py`
-needs `zoneinfo`, so **Python 3.9 or newer**. Synology's own Python 3 package
-on DSM 6.x is 3.8, which is too old. SynoCommunity's Python 3.11 covers DSM
-6.x and 7.x across the ARM and x86 architectures, including older ones like
-`armada370` (DS213j, DS216se).
+The usual blocker is Python: `octopus.py` needs `zoneinfo`, so 3.9 or newer,
+and DSM's own package on 6.x is 3.8. Check `uname -m` and `python3 --version`
+before anything else.
 
-```sh
-uname -m                # armv7l, x86_64, aarch64 ...
-python3 --version       # must be 3.9+
-openssl version         # only needed for --via-cloud or the mode restore
-```
+## Operating the agent
 
-If `uname -m` reports `armv5tel` (Marvell Kirkwood, pre-2013 models), stop —
-there is no usable Python there.
+Host-independent, once it is running.
 
-**No Docker on ARM models.** DSM's Docker/Container Manager package is x86
-only, so ignore the Dockerfile. Copy the `.py` files and `.env` to a share
-and run them directly — being dependency-free, there is nothing else to
-install.
+**Reading the log.** The lines that carry information:
 
-**Use Task Scheduler instead of systemd**, in Control Panel:
+| Line | Meaning |
+|---|---|
+| `SCHEDULE + added` | Octopus published a slot |
+| `SCHEDULE - WITHDRAWN` | a live slot was pulled — the expensive case |
+| `SCHEDULE   ended` | a slot ran to its end; routine |
+| `STARTED charging` | the plant has been commanded |
+| `holding` | charging, and re-checking every 30 s |
+| `RELEASED` with `cloud: restored mode N` | your normal mode is back |
+| `MODE REVERTED` | a Remote EMS release dropped you to Self-Consumption |
+| `RESTORE FAILED` | act on this: the plant may still be charging |
 
-| Task | Type | Runs |
-|---|---|---|
-| agent | Triggered Task → Boot-up | `cd /volume1/oig-sigen && nohup python3 reconcile.py --bonus-only --require-ev >/dev/null 2>&1 &` |
-| deadman | Scheduled Task, every 5 min | `cd /volume1/oig-sigen && python3 control.py --deadman` |
-| cloud deadman | Scheduled Task, every 5 min | `cd /volume1/oig-sigen && python3 sigencloud.py --deadman` |
+**The state files are the ground truth**, and both live beside the scripts:
 
-Run them as a user that owns the directory: state lives beside the scripts,
-and a deadman that cannot read `.lease.json` silently protects nothing.
+- `.lease.json` — a Remote EMS lease is held. Its absence is what makes
+  `control.py --deadman` a no-op.
+- `.cloud-mode.json` — a cloud mode switch is outstanding, and it records how
+  to undo it. Present with no agent running means something owes the plant a
+  restore; that is what `sigencloud.py --deadman` is for.
 
-**Networking:** the agent needs to reach the plant on your LAN and
-`api.octopus.energy` outbound. It needs no inbound access at all, so a NAS
-with no port forwarding is a sound place for it — but do not firewall it off
-from the internet entirely, or the schedule poll will simply time out.
-
-**Older DSM is end-of-life** (6.2 stopped getting updates some years ago).
-The agent puts your Octopus API key, and optionally your mySigen password, in
-a file on that machine. With no inbound exposure the risk is small, but it is
-a new class of secret on an unpatched box — worth deciding rather than
-defaulting into. The Modbus-only path needs no Sigen credentials at all.
+**Stopping it.** Plain `kill` — SIGTERM — never `kill -9`. The release path is
+wired to SIGTERM, SIGINT, normal exit and unhandled exceptions, so an ordinary
+kill hands the plant back on the way out. `-9` skips all of it and leaves the
+plant latched, or on the charging profile, until a deadman notices.
 
 ## Testing on a Mac laptop? Read this first
 

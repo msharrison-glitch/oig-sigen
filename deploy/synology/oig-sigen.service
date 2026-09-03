@@ -7,6 +7,9 @@ Wants=network-online.target
 Type=simple
 User=admin
 WorkingDirectory=/var/services/homes/admin/oig-sigen
+# --require-zappi asks a myenergi Zappi directly, with no lag. For any other
+# IOG charger use --require-ev instead, which infers the car from Octopus's
+# own completedDispatches and lags by up to half an hour.
 ExecStart=/usr/local/bin/python3.9 /var/services/homes/admin/oig-sigen/reconcile.py \
     --bonus-only --require-zappi \
     --via-cloud --charge-profile "OIG Charge" \

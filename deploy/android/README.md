@@ -1,11 +1,42 @@
 # Running the agent on an Android phone (Termux)
 
-Proven on a Redmi Note 10s (Android 13, MIUI) with Termux and Python 3.14.
+Verified here on a Redmi Note 10s (Android 13, MIUI) running Termux and
+Python 3.14 -- see "What one night actually proved" at the end for what that
+does and does not establish.
 
 **Why a phone.** Not because it is the best host -- it is not -- but because
 almost everyone has an old one in a drawer. It lets someone find out whether
 this project sees bonus slots on *their* Octopus account before buying any
 hardware. A Pi Zero 2 W is a better permanent home.
+
+## Choosing a device
+
+Nothing here is vendor-specific, and no model is recommended over another --
+only one has been tested, so anything else would be written blind. Judge a
+candidate in your drawer against these instead:
+
+| Requirement | Why |
+|---|---|
+| **Android 7.0 or newer** | Termux needs it, and the persisted periodic jobs the deadman relies on arrived with N |
+| **arm64 (`aarch64`)** | what Termux packages Python for most reliably -- check with `uname -m` |
+| **Wi-Fi reaching the plant's LAN** | telemetry is Modbus on TCP 502, local only |
+| **Can live permanently on a charger** | an agent asleep is an agent absent |
+| **~200 MB free storage** | Termux, Python and the repo |
+
+Explicitly **not** needed: a SIM, a working screen, Play Services, root, or
+much RAM -- this runs in well under 100 MB.
+
+The one thing that varies enormously between vendors is how aggressively the
+skin kills background processes. That is a setup problem rather than a
+disqualification, and it is dealt with below.
+
+**One hazard worth naming.** An old phone held at 100 % on a charger for
+months is a swelling risk, and a swollen cell in a cupboard is a fire in a
+cupboard. Look at it occasionally, do not shut it inside anything sealed, and
+retire it if the back starts to lift. A Pi Zero 2 W or any always-on Linux box
+avoids the question entirely and is the better permanent home. The phone's
+value is that it costs nothing to find out whether this project is worth
+anything on your account.
 
 ## Pick your rung
 
@@ -60,17 +91,29 @@ narrow one: tzdata is *data*, not a library. It is the same IANA database
 Debian and Alpine hand you through `apt` and `apk`. No code imports it; only
 `zoneinfo` reads it, and `zoneinfo` is stdlib.
 
-## MIUI will kill it otherwise
+## Your vendor's battery saver will kill it otherwise
 
-Xiaomi's skin is the most aggressive in Android about background processes.
-Before anything else:
+Every Android skin kills background processes; they differ only in how
+eagerly. Find your vendor's background-execution settings and exempt Termux
+from all of them. The wording varies -- look for autostart, battery
+optimisation or restriction, and a way to pin the app in the recents list.
+
+The worked example is MIUI, because that is the one actually tested here:
 
 - Settings -> Apps -> Termux -> **Autostart: on**
 - Settings -> Battery -> App battery saver -> Termux -> **No restrictions**
 - Recents -> long-press Termux -> **padlock**
 
-Even then, treat a kill as something that will happen, not something that
-might. That is the whole argument for `--via-cloud` on a phone.
+Then hold a wake lock, which is what stops the CPU sleeping between ticks:
+
+```sh
+termux-wake-lock
+```
+
+Even with all of that, treat a kill as something that will happen, not
+something that might. A quiet night proves nothing. The deadman below is what
+makes a kill survivable, and it is the whole argument for `--via-cloud` on a
+phone.
 
 ## Reaching the plant
 
@@ -78,7 +121,7 @@ Do not test with `ping` -- a SigenStor does not answer ICMP, so a failed ping
 proves nothing. Test the thing you actually need, which is Modbus on TCP 502:
 
 ```sh
-python3 probe.py 192.168.2.53
+python3 probe.py 192.168.1.100      # your plant's address
 ```
 
 An explicit host on the command line beats `.env`, and Modbus has no
@@ -153,4 +196,115 @@ happily start a second controller behind your back, and the guard in
 If you already run this on another host, **stop that agent first**. The
 guard in `reconcile.py` is a pid check against a local `.lease.json`, so it
 cannot see an agent on a different machine -- and `--via-cloud` takes no
-lease at all. Two of them would fight over the cloud operational mode.
+lease at all. Two of them would fight over the cloud operational mode, and
+worse than a clash: the second one reads the first's charging profile as the
+mode to go back to, so it "restores" the plant into charging.
+
+Stopping the other host may be less obvious than it sounds. On a Synology the
+agent is a systemd unit with `Restart=always` behind a Task Scheduler
+supervisor, so `kill` buys about thirty seconds -- see "Stopping it again is
+not just `kill`" in `../README.md`.
+
+## Running it
+
+Register the deadman first, and make sure no other host is running an agent.
+Then start with the rung that writes nothing at all:
+
+```sh
+cd ~/oig-sigen
+python3 reconcile.py --dry-run --bonus-only --require-zappi -v
+```
+
+Leave that running across a plug-in. If it logs a `SCHEDULE + added` line for
+a dispatch, the phone can see your bonus slots -- which is the entire question
+rung 1 exists to answer, and you have answered it without touching the plant.
+
+For rung 2, detach it so it outlives the terminal:
+
+```sh
+termux-wake-lock
+cd ~/oig-sigen && nohup python3 reconcile.py \
+    --bonus-only --require-zappi --via-cloud --charge-profile "OIG Charge" \
+    -v --log-file phone.log < /dev/null > phone-stdout.log 2>&1 &
+```
+
+`--charge-profile` names a custom profile you have already created in the
+mySigen app and configured to grid-charge. The agent selects it and puts your
+normal mode back afterwards; it cannot author the profile for you, and it
+refuses to start if the name does not resolve rather than charging blind.
+
+**Launched over SSH, that command appears to hang.** Redirecting all three
+streams is not enough -- ssh holds the channel open and never returns, which
+looks exactly like a failed launch. The agent is running fine. Open a second
+connection and look, rather than killing anything:
+
+```sh
+ssh -p 8022 u0_aNNN@<phone-ip> 'tail -5 ~/oig-sigen/phone.log'
+```
+
+A healthy first minute:
+
+    cloud actuation: profile 'OIG Charge' is id 1234
+    reconciler started (charging via cloud profile 1234 ..., no lease)
+    SOC 6.5%  grid -0.01 kW  ESS -0.39 kW  enable=0 mode=0 limit=unset -> idle
+    sleeping 303s
+
+Three independent things are working in those four lines: the Sigen cloud
+login, the Modbus read of the plant, and the schedule poll.
+
+## Operating it
+
+**Poke it the moment you plug the car in.** The first dispatch of a session
+starts within a few minutes of the plug going in and runs only to the next
+half-hour boundary, so it lands between the scheduled polls -- left alone you
+catch its tail rather than the whole thing. That means SIGHUP:
+
+```sh
+kill -HUP <pid>
+```
+
+Within five seconds the log says `SIGHUP -- re-polling now`.
+
+**Finding that pid is the awkward part.** `pgrep -f reconcile` does not work:
+BusyBox does not match against full command lines, so it finds nothing and
+reports nothing, which is indistinguishable from the agent being dead. Walk
+`/proc` instead:
+
+```sh
+for p in /proc/[0-9]*; do
+    case "$(tr '\0' ' ' < $p/cmdline 2>/dev/null)" in
+        *python3*reconcile.py*) echo "${p#/proc/}" ;;
+    esac
+done
+```
+
+**That snippet matches itself.** Your own shell's command line contains the
+string `reconcile.py`, so it turns up in its own results -- expect one extra
+pid every time, and identify the real agent by its `python3` argument rather
+than by counting. It is not a bug and it will catch you more than once.
+
+**Reading the log**, what `.cloud-mode.json` means, and why you must never
+`kill -9` are host-independent — see "Operating the agent" in
+[`../README.md`](../README.md). The short version of the last one: the release
+path is wired to SIGTERM, so a plain `kill` restores your mode on the way out
+and `-9` leaves the plant on the charging profile until the deadman notices.
+
+## What one night actually proved
+
+Observed 2026-09-02 on the device named at the top, running
+`--via-cloud --bonus-only --require-zappi`:
+
+- two bonus dispatches caught and charged, the second with nobody watching;
+- a real withdrawal -- provoked by unplugging the car mid-slot -- detected and
+  the operational mode restored **eight seconds later**, the plant actually
+  stopping within its 18-31 s actuation window;
+- a scheduled release at a slot boundary, 30 s early as intended;
+- ~10.5 hours continuous uptime with a wake lock held, and no kill by the skin;
+- 95 deadman ticks, every one correctly a no-op;
+- ~10.25 kW into the battery, the rate coming from the app profile.
+
+What that establishes is that a phone is a viable host for **rung 2**. What it
+does not: rung 3 remains a poor fit, because nothing here tested a latched
+mode surviving a dead host. Nor does one night without a background kill mean
+the kill will not come -- the battery-saver settings above are not made stale
+by it.
