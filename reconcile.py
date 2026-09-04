@@ -318,12 +318,31 @@ class PlantState:
     charge_limit_kw: float | None
     grid_kw: float | None = None      # positive = importing
     ess_kw: float | None = None       # positive = charging
+    # The app's operational mode, read locally from 30003. Logged, never
+    # decided on -- see the note in registers.py about the enum mapping.
+    work_mode: int | None = None
 
     def is_charging_at(self, kw: float) -> bool:
         return (self.enable == 1
                 and self.mode == R.EMS_COMMAND_CHARGE_GRID_FIRST
                 and self.charge_limit_kw is not None
                 and abs(self.charge_limit_kw - kw) <= LIMIT_TOLERANCE_KW)
+
+
+def _work_mode(value: int | None) -> str:
+    """The app's operational mode, for the status line.
+
+    Read locally from 30003 rather than the cloud. This exists because on
+    2026-09-03 a restore silently did not take and the plant sat on a
+    charging profile for eight hours -- every log line that night said
+    enable=0 mode=0, which was true and useless, because the mode that
+    mattered was the app's and we had no local sight of it. Now every line
+    carries it.
+    """
+    if value is None:
+        return "?"
+    name = R.EMS_WORK_MODE_NAMES.get(value)
+    return f"{value}({name})" if name else str(value)
 
 
 def _kw(value: float | None) -> str:
@@ -502,10 +521,14 @@ class Reconciler:
         limit = with_retry(R.read, self.client, R.ESS_MAX_CHARGE_LIMIT)
         grid = self._telemetry(R.GRID_ACTIVE_POWER)
         ess = self._telemetry(R.ESS_POWER)
+        # Read as telemetry, so a firmware that does not serve 30003 logs a
+        # blank rather than crashing the loop.
+        work = self._telemetry(R.EMS_WORK_MODE)
         return PlantState(enable, mode,
                           soc if isinstance(soc, (int, float)) else None,
                           limit if isinstance(limit, (int, float)) else None,
-                          grid, ess)
+                          grid, ess,
+                          int(work) if isinstance(work, (int, float)) else None)
 
     def _telemetry(self, reg):
         """Read a register we only log, never decide on.
@@ -810,12 +833,14 @@ class Reconciler:
         else:
             action = self.ensure_released(state)
 
-        log.info("SOC %s  grid %s  ESS %s  enable=%d mode=%d limit=%s -> %s%s",
+        log.info("SOC %s  grid %s  ESS %s  enable=%d mode=%d limit=%s "
+                 "work=%s -> %s%s",
                  f"{state.soc:.1f}%" if state.soc is not None else "?",
                  _kw(state.grid_kw), _kw(state.ess_kw),
                  state.enable, state.mode,
                  f"{state.charge_limit_kw:.2f} kW"
                  if state.charge_limit_kw is not None else "unset",
+                 _work_mode(state.work_mode),
                  action, reason)
         self.send_heartbeat(state, action)
         return action

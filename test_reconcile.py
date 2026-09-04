@@ -822,6 +822,30 @@ def main() -> int:
           rec.sleep_seconds(now, []) <= reconcile.DISPATCH_POLL_INTERVAL
           + reconcile.POLL_JITTER_SECONDS + 1, True)
 
+    print("\nThe app's operational mode is read locally, from 30003")
+    # Added 2026-09-04. CLAUDE.md had asserted no such register existed, and
+    # believing that is why a silently-failed restore went unnoticed for
+    # eight hours: every log line said enable=0 mode=0, both true, neither
+    # the mode that mattered.
+    pl_w = make_plant(soc_pct=50.0)
+    pl_w.input[30003] = 1
+    rec_w = reconciler(pl_w, FakeOctopus([]))
+    st_w = rec_w.read_plant()
+    check("read into PlantState", st_w.work_mode, 1)
+    check("and named in the status line",
+          reconcile._work_mode(st_w.work_mode), "1(Sigen AI)")
+    check("an unknown value still prints", reconcile._work_mode(42), "42")
+    check("and a missing one is not fatal", reconcile._work_mode(None), "?")
+
+    # A firmware that does not serve 30003 must log a blank, not crash the
+    # loop -- the same rule the other telemetry reads follow, and for the
+    # same reason: a lease may be held and nothing else can release it.
+    pl_n = make_plant(soc_pct=50.0)      # make_plant serves no 30003
+    rec_n = reconciler(pl_n, FakeOctopus([]))
+    st_n = rec_n.read_plant()
+    check("absent register -> None, not an exception", st_n.work_mode, None)
+    check("the decision-critical reads still land", st_n.soc, 50.0)
+
     print("\nThe SOC target has a band, so it does not chatter")
     # 2026-09-03: charge to 95%, release, Sigen AI exports 11.8 kW, SOC is
     # back under 95% inside two minutes, re-acquire. Four cycles in twenty

@@ -85,35 +85,38 @@ ESS_MAX_DISCHARGE_LIMIT = Register(
 
 # --- ESS SOC limits (40046-40048) ---------------------------------------
 #
-# Confirmed RW in protocol V2.7 and exposed by the community integration as
-# charge cut-off / discharge cut-off / backup reserve SOC. We READ them and do
-# not write them, for one specific reason: the community names them in the
-# order below, but this plant reads 40046 = 0 and 40047 = 100.0 %, and that
-# combination is documented elsewhere as "battery frozen" -- which it plainly
-# is not, since it was discharging at 11.8 kW at the time. Either the ordering
-# is the reverse of what is written below, or the semantics differ.
+# ORDERING SETTLED 2026-09-04 against the community integration
+# (TypQxQ/Sigenergy-Local-Modbus, modbusregisterdefinitions.py), which names
+# them BACKUP first:
 #
-# 0 % and 100.0 % are exactly what "no restriction in either direction" looks
-# like if the labels are swapped, which is the likelier reading. Until that is
-# settled against the mySigen app, writing these could silently stop the
-# battery. Verify before you write. See the limits lesson above.
+#     40046 backup SOC  |  40047 charge cut-off  |  40048 discharge cut-off
+#
+# An earlier version of this file had them as charge / discharge / backup and
+# called the ordering unverified, because 40046 reading 0 % looked like "never
+# charge" on a plant that was plainly charging. We were simply off by one:
+# 40046 is the backup reserve, and 0 % there is normal. This plant reads
+# 40046 = 0 %, 40047 = 100 %, 40048 = 0 % -- no reserve, charge to full,
+# discharge to empty, which is exactly "no restriction".
+#
+# Still READ-ONLY here by choice. The ordering is settled but the write
+# semantics are not tested on this firmware, and a wrong write silently stops
+# the battery. See the limits lesson above.
+
+ESS_BACKUP_SOC = Register(
+    40046, "ESS backup reserve SOC", "u16", True,
+    gain=10, unit="%",
+    note="Reserve held back for backup. 0 % here means no reserve.",
+)
 
 ESS_CHARGE_CUTOFF_SOC = Register(
-    40046, "ESS charge cut-off SOC (ordering UNVERIFIED)", "u16", True,
+    40047, "ESS charge cut-off SOC", "u16", True,
     gain=10, unit="%",
-    note="Do not write until the 40046/40047 ordering is confirmed.",
+    note="Charging stops here. 100 % on this plant.",
 )
 
 ESS_DISCHARGE_CUTOFF_SOC = Register(
-    40047, "ESS discharge cut-off SOC (ordering UNVERIFIED)", "u16", True,
-    gain=10, unit="%",
-    note="Do not write until the 40046/40047 ordering is confirmed.",
-)
-
-ESS_BACKUP_SOC = Register(
-    40048, "ESS backup reserve SOC", "u16", True, gain=10, unit="%",
-    note="Applies while grid-connected; the discharge cut-off takes over "
-         "during an outage.",
+    40048, "ESS discharge cut-off SOC", "u16", True, gain=10, unit="%",
+    note="Discharging stops here. 0 % on this plant.",
 )
 
 
@@ -126,6 +129,42 @@ GRID_MAX_EXPORT_LIMIT = Register(
 ACTIVE_POWER_TARGET = Register(
     40001, "Active power fixed adjustment target", "s32", True,
     gain=1000, unit="kW",
+)
+
+
+# --- Operational mode (READ-ONLY) ----------------------------------------
+#
+# An earlier version of this file stated flatly that the app's operational
+# mode has NO Modbus register at plant or device level. That was wrong, and
+# it cost real money: on 2026-09-03 a cloud restore silently did not take and
+# the plant sat on a charging profile for eight hours, undetected, because we
+# believed the only way to see the mode was the unofficial cloud API.
+#
+# We missed it by searching the HOLDING range (40040-40120, 40500-40560) for
+# something WRITABLE. It is an input register, 30003, and read-only -- so the
+# cloud is still the only way to SET the mode, but not to SEE it.
+#
+# Named plant_ems_work_mode by the community integration. Enum below.
+
+EMS_WORK_MODE_MAX_SELF_CONSUMPTION = 0
+EMS_WORK_MODE_AI = 1
+EMS_WORK_MODE_TOU = 2
+EMS_WORK_MODE_FULL_FEED_IN = 5
+
+EMS_WORK_MODE_NAMES = {
+    EMS_WORK_MODE_MAX_SELF_CONSUMPTION: "Maximum Self-Powered",
+    EMS_WORK_MODE_AI: "Sigen AI",
+    EMS_WORK_MODE_TOU: "TOU",
+    EMS_WORK_MODE_FULL_FEED_IN: "Fully Fed to Grid",
+}
+
+# The numbering is ASSUMED to match the cloud API's operationMode, on one
+# observation: 2026-09-04, 30003 = 1 while the cloud reported currentMode 1
+# (Sigen AI). One agreeing data point is not a mapping. Until it has been
+# watched through an actual change, this is logged and never acted on.
+EMS_WORK_MODE = Register(
+    30003, "EMS work mode (app operational mode)", "u16", False,
+    note="Read-only. Enum mapping to the cloud API is provisional.",
 )
 
 
@@ -195,13 +234,14 @@ PROBE_SET: list[Register] = [
     ESS_MAX_DISCHARGE_LIMIT,
     GRID_MAX_EXPORT_LIMIT,
     ACTIVE_POWER_TARGET,
+    ESS_BACKUP_SOC,
     ESS_CHARGE_CUTOFF_SOC,
     ESS_DISCHARGE_CUTOFF_SOC,
-    ESS_BACKUP_SOC,
 ]
 
 # The compact set used for live monitoring during a control lease.
 LIVE_SET: list[Register] = [
+    EMS_WORK_MODE,
     ESS_SOC,
     ESS_POWER,
     PV_POWER,
