@@ -650,8 +650,12 @@ class Reconciler:
             # changes nothing used to be indistinguishable from one that
             # worked -- and the next two lines delete the deadman's only
             # record, so believing it wrongly leaves nothing watching.
-            # Observed 2026-09-03: the plant stayed on the charge profile
-            # for eight hours after a "successful" restore.
+            #
+            # The 2026-09-03 incident this was written for turned out to have
+            # a different cause: a second controller overwrote a restore that
+            # had genuinely taken. See set_mode_verified for the correction.
+            # The check stays -- it is cheap and it catches both -- but one
+            # agent per plant is what actually prevents that failure.
             self.cloud.set_mode_verified(int(restore), int(profile))
             log.info("cloud: restored mode %s", restore)
         except Exception as exc:                  # noqa: BLE001

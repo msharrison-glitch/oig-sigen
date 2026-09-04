@@ -243,17 +243,27 @@ class SigenCloud:
                           profile_id: int = -1) -> dict:
         """Set the mode, then read it back and prove it actually took.
 
-        The PUT can return success and change nothing. Observed 2026-09-03:
-        a restore to mode 1 was accepted, logged as done, and the deadman's
-        state file cleared on the strength of it -- and the plant then sat on
-        the charging profile for the next eight hours, through the whole
-        morning peak, with the battery frozen at 100% and roughly GBP 3-4 of
-        export not taken.
+        The PUT can return success and change nothing, and an unverified
+        write is worse than a failed one, because the caller deletes the only
+        record that would let anything else put it right. So prove it, and
+        let the caller's existing failure path keep that record when we
+        cannot.
 
-        An unverified write is worse than a failed one here, because the
-        caller deletes the only record that would let anything else put it
-        right. So prove it, and let the caller's existing failure path keep
-        that record when we cannot.
+        A CORRECTION, for whoever reads this next. This was written on
+        2026-09-03 believing a restore to mode 1 had been accepted and
+        silently ignored, leaving the plant on the charging profile for eight
+        hours. That was a misdiagnosis. The write took. A SECOND CONTROLLER
+        on another host -- restarted by a Synology boot-up task after a power
+        cut, unnoticed -- set the plant back to the charging profile three
+        seconds later.
+
+        The verification is still right, and it would catch that case too.
+        But be clear about what it does not do: it reads back after
+        MODE_VERIFY_SETTLE, and a competing controller three seconds behind
+        can overwrite us just after we have confirmed. Verification proves
+        our own write landed. It is not, and cannot be, protection against
+        somebody else writing. The only protection there is one agent per
+        plant.
         """
         result = self.set_mode(operation_mode, profile_id)
         last = None

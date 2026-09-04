@@ -152,10 +152,30 @@ sudo systemctl stop oig-sigen        # needs ssh -t
 systemctl is-active oig-sigen        # want: inactive
 ```
 
-The rename needs no root, since the agent's own user owns that script, and it
-defangs the scheduled task whichever way that task invokes it. `Restart=always`
-does not fire after an explicit `systemctl stop`, so with the supervisor out of
-the way the stop sticks. Rename it back to undo.
+The rename needs no root, since the agent's own user owns that script.
+`Restart=always` does not fire after an explicit `systemctl stop`, so with the
+periodic supervisor out of the way the stop sticks. Rename it back to undo.
+
+**But that is not enough, and an earlier version of this section said it was.**
+There is a SECOND Task Scheduler entry -- the **Boot-up** task, the one in the
+table above that launches the agent. It does not go through
+`install-service.sh`, so renaming that script does nothing to it, and it fires
+on every power-on.
+
+Observed 2026-09-03: a smart plug power-cycled, taking the router and the NAS
+with it. The NAS rebooted, the boot-up task started the agent two minutes
+later, and it ran for the next 25 hours -- defeating both the rename and a
+`systemctl stop` that had been confirmed `inactive` an hour earlier. Nobody
+noticed, because everything that reports on the agent is the agent.
+
+It then fought a second controller on another host all night and reset the
+plant to the charging profile twice, three seconds after the other agent had
+correctly restored it.
+
+So to genuinely stop it, **disable the boot-up task in Control Panel → Task
+Scheduler as well** -- untick it, do not delete it -- and remember to re-enable
+it afterwards. A stop you cannot see is worse than no stop, because you plan
+around it.
 
 This matters most when moving the agent to another host — two must never run
 at once, and `reconcile.py`'s own guard is a local pid check that cannot see
