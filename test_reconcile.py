@@ -27,6 +27,7 @@ import control
 import reconcile
 import registers as R
 import sigen
+import sigencloud as _sc
 from octopus import OctopusError, Slot
 from sigen import SigenClient
 from test_mock import MockPlant
@@ -421,6 +422,14 @@ def main() -> int:
                 raise RuntimeError("cloud down")
             self.sets.append((m, p)); self.mode, self.profile = m, p
             return {"code": 0}
+        def set_mode_verified(self, m, p=-1):
+            # Mirrors the real client: write, then read back and prove it.
+            r = self.set_mode(m, p)
+            cur = self.current_mode()
+            if cur.get("currentMode") != m or (
+                    p != -1 and cur.get("currentProfileId") != p):
+                raise _sc.SigenCloudError("mode did not take")
+            return r
         def firmware_revert(self):
             # What the plant actually does when Remote EMS is released:
             # drops to Maximum Self-Powered regardless of what was selected.
@@ -518,6 +527,14 @@ def main() -> int:
         def set_mode(self, m, p=-1):
             self.sets.append((m, p)); self.mode, self.profile = m, p
             return {"code": 0}
+        def set_mode_verified(self, m, p=-1):
+            # Mirrors the real client: write, then read back and prove it.
+            r = self.set_mode(m, p)
+            cur = self.current_mode()
+            if cur.get("currentMode") != m or (
+                    p != -1 and cur.get("currentProfileId") != p):
+                raise _sc.SigenCloudError("mode did not take")
+            return r
 
     live_c = slot_at(now, -5, 55, "dispatch")
     plant_c2 = make_plant(soc_pct=40.0)
@@ -576,6 +593,43 @@ def main() -> int:
           rec_x.tick(now), "RELEASED")
     check("restored away from the charge profile",
           xc.sets, [(reconcile.DEFAULT_RESTORE_MODE, -1)])
+    sigencloud.clear_cloud_state()
+
+    print("\nA restore that is accepted but ignored must NOT clear the deadman")
+    # 2026-09-03, the expensive one. The PUT returned success, the agent
+    # logged "restored mode 1" and deleted .cloud-mode.json -- and the plant
+    # stayed on the charge profile for eight hours, battery frozen at 100%
+    # through the whole morning peak. An unverified write is worse than a
+    # failed one, because clearing the state file leaves nothing watching.
+    sigencloud.clear_cloud_state()
+
+    class DeafCloud(FakeCloud):
+        """Accepts every write and changes nothing after the first."""
+        def __init__(self, mode=1):
+            super().__init__(mode); self.calls = 0
+        def set_mode(self, m, p=-1):
+            self.calls += 1
+            self.sets.append((m, p))
+            if self.calls == 1:                 # the acquire works
+                self.mode, self.profile = m, p
+            return {"code": 0}                  # ... and the restore lies
+
+    plant_d = make_plant(soc_pct=40.0)
+    dc = DeafCloud(mode=1)
+    rec_d = reconcile.Reconciler(client_for(plant_d), FakeOctopus([live_c]),
+                                 5.0, 95.0, bonus_only=True, cloud=dc,
+                                 charge_profile_id=9664)
+    check("acquires normally", rec_d.tick(now), "STARTED charging")
+    rec_d.octopus.slots = []
+    check("a restore that did not take is reported, not celebrated",
+          rec_d.tick(now), "RESTORE FAILED")
+    kept = sigencloud.read_cloud_state()
+    check("and the deadman's record is KEPT, not cleared",
+          kept is not None, True)
+    check("still pointing at the owner's mode",
+          (kept or {}).get("restore_mode"), 1)
+    check("the plant really is still on the charge profile",
+          dc.current_mode()["currentMode"], 9)
     sigencloud.clear_cloud_state()
 
     print("\nCloud actuation refuses to switch blind")

@@ -93,6 +93,11 @@ def main() -> int:
     class FakeCloud:
         def __init__(self, mode): self.mode = mode; self.sets = []
         def current_mode(self): return {"currentMode": self.mode}
+        def set_mode_verified(self, m, p=-1):
+            r = self.set_mode(m, p)
+            if self.current_mode().get("currentMode") != m:
+                raise sigencloud.SigenCloudError("mode did not take")
+            return r
         def set_mode(self, m, p=-1):
             self.sets.append((m, p)); self.mode = m; return {"code": 0}
 
@@ -122,6 +127,29 @@ def main() -> int:
     check("already in the right mode -> no pointless write", fc2.sets, [])
     check("but the stale state is tidied",
           sigencloud.read_cloud_state(), None)
+
+    print("\nThe deadman keeps its record when the restore does not take")
+    class DeafCloud:
+        """Accepts the write, changes nothing. The 2026-09-03 failure."""
+        def __init__(self, mode): self.mode = mode; self.sets = []
+        def current_mode(self): return {"currentMode": self.mode}
+        def set_mode(self, m, p=-1):
+            self.sets.append((m, p)); return {"code": 0}   # no state change
+        def set_mode_verified(self, m, p=-1):
+            r = self.set_mode(m, p)
+            if self.current_mode().get("currentMode") != m:
+                raise sigencloud.SigenCloudError("mode did not take")
+            return r
+
+    dc = DeafCloud(9)                       # still on the charge profile
+    sigencloud.write_cloud_state({"restore_mode": 1, "restore_profile": -1,
+                                  "expires_at": past})
+    rc = sigencloud.deadman(dc)
+    check("reports failure rather than 0", rc, 1)
+    check("it did attempt the restore", dc.sets, [(1, -1)])
+    check("but the record is KEPT so the next tick retries",
+          sigencloud.read_cloud_state() is not None, True)
+    sigencloud.clear_cloud_state()
 
     print("\nAn expired token re-authenticates instead of killing the agent")
     # 2026-09-03: after ~24 h up, the API answered 424 "user credentials have

@@ -239,6 +239,40 @@ class SigenCloud:
             "profileId": profile_id,
         })
 
+    def set_mode_verified(self, operation_mode: int,
+                          profile_id: int = -1) -> dict:
+        """Set the mode, then read it back and prove it actually took.
+
+        The PUT can return success and change nothing. Observed 2026-09-03:
+        a restore to mode 1 was accepted, logged as done, and the deadman's
+        state file cleared on the strength of it -- and the plant then sat on
+        the charging profile for the next eight hours, through the whole
+        morning peak, with the battery frozen at 100% and roughly GBP 3-4 of
+        export not taken.
+
+        An unverified write is worse than a failed one here, because the
+        caller deletes the only record that would let anything else put it
+        right. So prove it, and let the caller's existing failure path keep
+        that record when we cannot.
+        """
+        result = self.set_mode(operation_mode, profile_id)
+        last = None
+        for attempt in range(MODE_VERIFY_ATTEMPTS):
+            if MODE_VERIFY_SETTLE:
+                time.sleep(MODE_VERIFY_SETTLE)
+            last = self.current_mode()
+            if last.get("currentMode") != operation_mode:
+                continue
+            # profileId only matters when selecting a custom profile
+            if profile_id != -1 and last.get("currentProfileId") != profile_id:
+                continue
+            return result
+        raise SigenCloudError(
+            f"mode did not take: asked for mode {operation_mode} "
+            f"profile {profile_id}, plant still reports mode "
+            f"{(last or {}).get('currentMode')} "
+            f"profile {(last or {}).get('currentProfileId')}")
+
 
 # --------------------------------------------------------------------------
 # deadman
@@ -248,6 +282,12 @@ class SigenCloud:
 # switched back. Its presence means "a charge profile may be selected"; the
 # deadman restores if it has outlived its slot.
 CLOUD_STATE = state_path(".cloud-mode.json")
+
+# How hard set_mode_verified looks before giving up. The plant takes 18-31 s
+# to actuate, but the API's own view of the mode updates far sooner; this is
+# about catching a write that never landed, not waiting for the inverter.
+MODE_VERIFY_ATTEMPTS = 4
+MODE_VERIFY_SETTLE = 2.5
 
 
 def write_cloud_state(payload: dict) -> None:
@@ -351,7 +391,14 @@ def deadman(client: "SigenCloud | None" = None) -> int:
         return 0
     print(f"DEADMAN: charge selection expired at {expires}; "
           f"restoring mode {restore_to}")
-    client.set_mode(int(restore_to), int(restore_profile))
+    try:
+        client.set_mode_verified(int(restore_to), int(restore_profile))
+    except SigenCloudError as exc:
+        # Keep the state file. Something must still be able to put this
+        # right, and the next tick of the deadman is that something.
+        print(f"DEADMAN: restore did NOT take ({exc}); state kept for retry",
+              file=sys.stderr)
+        return 1
     clear_cloud_state()
     return 0
 

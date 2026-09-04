@@ -564,7 +564,7 @@ class Reconciler:
         # die between here and the restore, the deadman still knows what to
         # put back.
         self._cloud_record(slot, restore_mode, restore_profile)
-        self.cloud.set_mode(9, self.charge_profile_id)
+        self.cloud.set_mode_verified(9, self.charge_profile_id)
         self.cloud_held = True
         log.info("cloud: selected charging profile %s (was mode %s)",
                  self.charge_profile_id, restore_mode)
@@ -594,7 +594,13 @@ class Reconciler:
         restore = state.get("restore_mode", DEFAULT_RESTORE_MODE)
         profile = state.get("restore_profile", -1)
         try:
-            self.cloud.set_mode(int(restore), int(profile))
+            # Verified, not fire-and-forget. A PUT that returns success and
+            # changes nothing used to be indistinguishable from one that
+            # worked -- and the next two lines delete the deadman's only
+            # record, so believing it wrongly leaves nothing watching.
+            # Observed 2026-09-03: the plant stayed on the charge profile
+            # for eight hours after a "successful" restore.
+            self.cloud.set_mode_verified(int(restore), int(profile))
             log.info("cloud: restored mode %s", restore)
         except Exception as exc:                  # noqa: BLE001
             # Leave the state file: the deadman must still be able to undo
