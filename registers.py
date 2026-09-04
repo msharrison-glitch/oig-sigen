@@ -150,18 +150,28 @@ EMS_WORK_MODE_MAX_SELF_CONSUMPTION = 0
 EMS_WORK_MODE_AI = 1
 EMS_WORK_MODE_TOU = 2
 EMS_WORK_MODE_FULL_FEED_IN = 5
+EMS_WORK_MODE_REMOTE_EMS = 7
+EMS_WORK_MODE_CUSTOM = 9            # a custom energy profile is selected
 
 EMS_WORK_MODE_NAMES = {
     EMS_WORK_MODE_MAX_SELF_CONSUMPTION: "Maximum Self-Powered",
     EMS_WORK_MODE_AI: "Sigen AI",
     EMS_WORK_MODE_TOU: "TOU",
     EMS_WORK_MODE_FULL_FEED_IN: "Fully Fed to Grid",
+    EMS_WORK_MODE_REMOTE_EMS: "Remote EMS",
+    EMS_WORK_MODE_CUSTOM: "Custom profile",
 }
 
-# The numbering is ASSUMED to match the cloud API's operationMode, on one
-# observation: 2026-09-04, 30003 = 1 while the cloud reported currentMode 1
-# (Sigen AI). One agreeing data point is not a mapping. Until it has been
-# watched through an actual change, this is logged and never acted on.
+# CONFIRMED 2026-09-04 that the numbering matches the cloud API's
+# operationMode, by watching it through a real change rather than a single
+# agreeing reading: 30003 read 1 (Sigen AI) while idle, then 9 the moment
+# `set_mode(9, <charge profile>)` took effect at the start of a bonus slot,
+# and the cloud agreed at both points.
+#
+# So this is now a usable instrument, not just a hopeful one: the operational
+# mode can be verified locally, in about a second, with no cloud call. Note
+# 30003 gives the MODE only -- which custom profile is selected is not
+# visible here, so 9 means "some custom profile", not necessarily ours.
 # --- Running state -------------------------------------------------------
 #
 # Shared enumeration ("Appendix 1") behind both the plant and inverter
