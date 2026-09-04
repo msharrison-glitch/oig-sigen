@@ -131,6 +131,7 @@ def main() -> int:
     reconcile.BASE_POLL_INTERVAL = 300.0
     reconcile.DISPATCH_POLL_INTERVAL = 30.0
     reconcile.CONFIRM_POLL_INTERVAL = 30.0
+    reconcile.RESUME_BAND_PCT = 10.0
     control.STATE_FILE = _TMP / ".lease-reconcile-test.json"
     control.clear_state()
 
@@ -820,6 +821,44 @@ def main() -> int:
     check("holding a bonus slot polls harder",
           rec.sleep_seconds(now, []) <= reconcile.DISPATCH_POLL_INTERVAL
           + reconcile.POLL_JITTER_SECONDS + 1, True)
+
+    print("\nThe SOC target has a band, so it does not chatter")
+    # 2026-09-03: charge to 95%, release, Sigen AI exports 11.8 kW, SOC is
+    # back under 95% inside two minutes, re-acquire. Four cycles in twenty
+    # minutes, eight cloud writes. The cycling earns money; the switching is
+    # what costs reliability, so bound the switching.
+    def soc(plant, pct):
+        plant.input[30014] = int(pct * 10)
+
+    band_slot = slot_at(now, -5, 55, "dispatch")
+    pl_h = make_plant(soc_pct=40.0)
+    hc = FakeCloud(mode=1)
+    rec_h = reconcile.Reconciler(client_for(pl_h), FakeOctopus([band_slot]),
+                                 5.0, 95.0, bonus_only=True, cloud=hc,
+                                 charge_profile_id=9664)
+    check("well below target -> charges", rec_h.tick(now), "STARTED charging")
+    soc(pl_h, 95.4)
+    check("reaching the target releases", rec_h.tick(now), "RELEASED")
+    soc(pl_h, 92.0)
+    check("a dip just under the target does NOT re-acquire",
+          rec_h.tick(now), "idle")
+    soc(pl_h, 86.0)
+    check("nor does one still inside the band", rec_h.tick(now), "idle")
+    soc(pl_h, 84.5)
+    check("below the band it resumes", rec_h.tick(now), "STARTED charging")
+    check("two switches, not six", len(hc.sets), 3)
+
+    # The band is a latch, not a floor: a plant that has never reached the
+    # target must still charge at 92%, or a slot starting near full would
+    # be sat out entirely.
+    pl_h2 = make_plant(soc_pct=92.0)
+    hc2 = FakeCloud(mode=1)
+    rec_h2 = reconcile.Reconciler(client_for(pl_h2), FakeOctopus([band_slot]),
+                                  5.0, 95.0, bonus_only=True, cloud=hc2,
+                                  charge_profile_id=9664)
+    check("never having hit the target, 92% still charges",
+          rec_h2.tick(now), "STARTED charging")
+    sigencloud.clear_cloud_state()
 
     print("\nA spent slot is not a withdrawal")
     spent = slot_at(now, -60, -10, "dispatch")   # ran and finished

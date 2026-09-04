@@ -150,6 +150,30 @@ RELEASE_LEAD = 30.0
 # comfortably above the renewal cadence so a slow tick never lets it lapse.
 LEASE_TTL_MINUTES = 15
 
+def _resume_band() -> float:
+    """How far SOC must fall below the target before charging resumes.
+
+    Without a band the release is stateless -- stop at the target, and the
+    instant Sigen AI exports the battery a hair below it we acquire again.
+    At its 11.8 kW export that is under two minutes. Observed 2026-09-03:
+    four acquire/release cycles in twenty minutes, eight cloud mode writes.
+
+    This bounds the switching rather than stopping it, deliberately. The
+    cycling is *profitable* -- bought at 4.49p, exported at 13-24p, ~8.4p a
+    kWh after the round trip -- so the argument for a band is reliability,
+    not economics: every switch is a write to an unofficial API that has
+    been seen to accept a request and silently ignore it.
+    """
+    default = 10.0
+    try:
+        value = float(load_env().get("IOG_RESUME_BAND_PCT", "") or default)
+    except (ValueError, ConfigError):
+        return default
+    return min(max(value, 0.0), 50.0)
+
+
+RESUME_BAND_PCT = _resume_band()
+
 # What to put the plant back on when we have no better answer. 1 is Sigen AI,
 # which is what this project assumes the owner runs -- the whole point is to
 # patch one blind spot in it, not to replace it. Owners on another mode should
@@ -386,6 +410,11 @@ class Reconciler:
         self.lease = control.Lease(client, log=log.info)
         self._last_source = "none"
         self._holding_dispatch = False
+        # Latched when SOC reaches the target, cleared only once it falls a
+        # whole band below. Deliberately not persisted: a restart resumes at
+        # whatever the SOC is, which is the old behaviour and safe -- it can
+        # charge one extra time, not skip a slot.
+        self._at_target = False
 
     # -- inputs ----------------------------------------------------------
 
@@ -724,12 +753,18 @@ class Reconciler:
         target = desired_slot(slots, now)
 
         reason = ""
-        if target is not None and state.soc is not None \
-                and state.soc >= self.target_soc:
-            log.info("inside a cheap slot but SOC is %.1f%% (target %.1f%%) "
-                     "-- nothing to gain", state.soc, self.target_soc)
-            target = None
-            reason = " (battery at target)"
+        if target is not None and state.soc is not None:
+            resume_at = self.target_soc - RESUME_BAND_PCT
+            if state.soc >= self.target_soc:
+                self._at_target = True
+            elif state.soc <= resume_at:
+                self._at_target = False
+            if self._at_target:
+                log.info("inside a cheap slot but SOC is %.1f%% (target "
+                         "%.1f%%, resume below %.1f%%) -- nothing to gain",
+                         state.soc, self.target_soc, resume_at)
+                target = None
+                reason = " (battery at target)"
 
         # A planned dispatch is a forecast about the CAR, not a price
         # guarantee. If the car never draws, the dispatch never completes and
