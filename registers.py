@@ -162,6 +162,33 @@ EMS_WORK_MODE_NAMES = {
 # observation: 2026-09-04, 30003 = 1 while the cloud reported currentMode 1
 # (Sigen AI). One agreeing data point is not a mapping. Until it has been
 # watched through an actual change, this is logged and never acted on.
+# --- Running state -------------------------------------------------------
+#
+# Shared enumeration ("Appendix 1") behind both the plant and inverter
+# running-state registers. Learned the hard way on 2026-09-04: an experiment
+# assumed this was binary, waited for 0 while the plant sat at 3, timed out,
+# and left the plant halted. SHUTDOWN is a state the plant PASSES THROUGH --
+# roughly 100 s on this hardware -- not a failure to stop.
+
+RUNNING_STANDBY = 0          # stopped, and what 40000 = 0 arrives at
+RUNNING_RUNNING = 1
+RUNNING_FAULT = 2
+RUNNING_SHUTDOWN = 3         # transitional: stopping, not stopped
+RUNNING_ENV_ABNORMAL = 7
+
+RUNNING_STATE_NAMES = {
+    RUNNING_STANDBY: "standby",
+    RUNNING_RUNNING: "running",
+    RUNNING_FAULT: "FAULT",
+    RUNNING_SHUTDOWN: "shutting down",
+    RUNNING_ENV_ABNORMAL: "environmental abnormality",
+}
+
+PLANT_RUNNING_STATE = Register(
+    30051, "Plant running state", "u16", False,
+    note="Enum above. Plant unit -- no need for the inverter unit.",
+)
+
 EMS_WORK_MODE = Register(
     30003, "EMS work mode (app operational mode)", "u16", False,
     note="Read-only. Enum mapping to the cloud API is provisional.",
