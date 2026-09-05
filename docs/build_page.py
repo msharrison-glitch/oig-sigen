@@ -41,12 +41,27 @@ TITLE = "The Settlement Gap"
 
 
 def inline(text: str) -> str:
-    """Inline spans. Escape FIRST, then mark up, so content cannot inject."""
+    """Inline spans. Escape FIRST, then mark up, so content cannot inject.
+
+    Code spans are lifted out before the emphasis passes and put back after.
+    Without that, an asterisk inside backticks pairs with one outside it and
+    the tags interleave: `*.log` next to *emphasis* produced
+    "<code><em>.log</code> and </em>", which browsers recover from however
+    they like. This is a document about CLI flags and globs, so that input is
+    a matter of time rather than hypothesis.
+    """
     out = html.escape(text, quote=False)
-    out = re.sub(r"`([^`]+)`", r"<code>\1</code>", out)
+    spans: list[str] = []
+
+    def stash(m: re.Match) -> str:
+        spans.append(m.group(1))
+        return f"\x00{len(spans) - 1}\x00"
+
+    out = re.sub(r"`([^`]+)`", stash, out)
     out = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", out)
     out = re.sub(r"(?<!\*)\*(?!\*)([^*]+)\*(?!\*)", r"<em>\1</em>", out)
-    return out
+    return re.sub(r"\x00(\d+)\x00",
+                  lambda m: f"<code>{spans[int(m.group(1))]}</code>", out)
 
 
 def convert(md: str, figure: str) -> str:
@@ -92,15 +107,31 @@ def convert(md: str, figure: str) -> str:
             out.append("<pre>" + html.escape("\n".join(block)) + "</pre>")
         elif re.match(r"^\d+\. ", line):
             flush()
-            items = []
-            while i < len(lines) and re.match(r"^\d+\. ", lines[i]):
-                item = re.sub(r"^\d+\. ", "", lines[i])
-                i += 1
-                while i < len(lines) and lines[i].startswith("   ") \
-                        and lines[i].strip() and not re.match(r"^\d+\. ", lines[i]):
-                    item += " " + lines[i].strip()
+            items: list[str] = []
+            # A blank line BETWEEN items is the normal markdown idiom, and
+            # the first version stopped at it -- emitting one <ol> per item,
+            # each restarting at 1 because page.css counter-resets per list.
+            # Worse, an indented continuation after a blank fell through to
+            # the code-block branch and rendered as <pre>. Look past blanks
+            # for a continuation before giving up on the list.
+            while i < len(lines):
+                if re.match(r"^\d+\. ", lines[i]):
+                    items.append(re.sub(r"^\d+\. ", "", lines[i]))
                     i += 1
-                items.append(item)
+                elif items and lines[i].strip() and lines[i].startswith("   "):
+                    items[-1] += " " + lines[i].strip()
+                    i += 1
+                elif not lines[i].strip():
+                    j = i
+                    while j < len(lines) and not lines[j].strip():
+                        j += 1
+                    if j < len(lines) and (re.match(r"^\d+\. ", lines[j])
+                                           or lines[j].startswith("   ")):
+                        i = j
+                    else:
+                        break
+                else:
+                    break
             out.append('<ol class="steps">'
                        + "".join(f"<li>{inline(x)}</li>" for x in items)
                        + "</ol>")
@@ -112,6 +143,14 @@ def convert(md: str, figure: str) -> str:
                 i += 1
                 while i < len(lines) and lines[i].startswith("  ") \
                         and lines[i].strip():
+                    if re.match(r"^\s+[-*] ", lines[i]):
+                        raise ValueError(
+                            f"line {i+1}: nested bullets are not supported."
+                            " The first version silently folded them into the"
+                            " parent item with the marker still visible, which"
+                            " is the mangling this converter exists to refuse."
+                            " Add real nesting to build_page.py, or flatten"
+                            " the list in the markdown.")
                     item += " " + lines[i].strip()
                     i += 1
                 items.append(item)
@@ -139,22 +178,23 @@ def main() -> int:
             print(f"missing: {path}", file=sys.stderr)
             return 2
 
-    md = SOURCE.read_text()
+    md = SOURCE.read_text(encoding="utf-8")
     if FIGURE_MARKER not in md:
         print(f"warning: {FIGURE_MARKER} not in the markdown; the timeline "
               "will not appear", file=sys.stderr)
 
-    body = convert(md, FIGURE.read_text().strip())
-    page = (f"<title>{html.escape(TITLE)}</title>\n"
+    body = convert(md, FIGURE.read_text(encoding="utf-8").strip())
+    page = ('<meta charset="utf-8">\n'
+            f"<title>{html.escape(TITLE)}</title>\n"
             '<link rel="preconnect" href="https://fonts.googleapis.com">\n'
             '<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>\n'
             '<link rel="stylesheet" href="https://fonts.googleapis.com/css2?'
             "family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600"
             '&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">\n'
-            f"<style>\n{CSS.read_text().strip()}\n</style>\n\n"
+            f"<style>\n{CSS.read_text(encoding='utf-8').strip()}\n</style>\n\n"
             f'<div class="wrap">\n{body}\n</div>\n')
     out = pathlib.Path(args.out)
-    out.write_text(page)
+    out.write_text(page, encoding="utf-8")
     print(f"{out}  ({len(page)} bytes, {len(body.splitlines())} blocks)")
     return 0
 
