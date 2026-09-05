@@ -173,6 +173,27 @@ to 30 minutes, which is the very window we are trying to close.
 
 ## Before building
 
-Wait for a second night where the car finishes mid-dispatch, and check
-`completedDispatches` the next morning. If completions truncate again, build
-it. If they do not, delete this file and keep the current behaviour.
+Wait for a second night where the car finishes mid-dispatch, then read
+`completedDispatches` **the same evening, within a couple of hours**. If
+completions truncate again, build it. If they do not, delete this file and keep
+the current behaviour.
+
+### Why not just re-read last night's data instead
+
+That was the plan, and it is a better idea in principle: one query settles it,
+against waiting weeks for another car-finishes-early evening. It does not work
+against this API.
+
+Run at 20:35 on 5 September, 21.6 hours after the event, the feed returned
+`completedDispatches: 0` -- not just the contested half-hour but ALL of them,
+including the three that were present at 07:12 and 07:47 that same morning.
+Either the retention window is shorter than a day, or the list is scoped to the
+current charging session and resets. Absence at that range is uninformative, and
+no late query can distinguish truncation from lag.
+
+**Settlement evidence is perishable. Capture it the same evening or not at all.**
+
+So the evidence stays fixed at the morning reads, which are the sound kind of
+comparison -- within one snapshot, three consecutive half-hours present and the
+fourth absent. For that to be lag, one record would have had to be ten times
+slower than its immediate neighbours.
