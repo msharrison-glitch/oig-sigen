@@ -79,31 +79,47 @@ That distinction is the whole value of having waited for the settlement data.
 Without it the obvious design -- "stop when the car stops" -- would have cost
 more than it saved about half the time.
 
-## Why this is structural, not an edge case
+## Why the car finishes early here
 
-On this setup Octopus integrates with the **charger**, not the car. Nothing in
-the chain knows the car's state of charge: AC charging over Type 2 does not
-expose SOC to the EVSE, and there is no SOC field anywhere in the myenergi
-payload. So Kraken plans from the owner's target and ready-by time plus
-assumptions.
+**Corrected 2026-09-05.** An earlier version of this section blamed Octopus for
+planning blind -- `deltaKwh -28` against a car that took 7.54 kWh -- and called
+the gap structural. That was wrong, and it was my inference rather than the
+owner's account. Octopus honours a 6-hour cheap-charging allowance, and this
+owner deliberately requests the full six hours regardless of the car's state of
+charge, because that is what generates the bonus slots this project exists to
+catch. Octopus was doing exactly as asked.
 
-That is visible in the data. The planned dispatch carried `deltaKwh -28`
-against a car that took **7.54 kWh**. Octopus was not stale, it was guessing,
-because it had nothing to be right with.
+What follows still holds, with a narrower claim. When you request more charging
+than the car needs, the car finishes early and the planned dispatch outlives it.
+On this install that is the *deliberate normal case*, not an occasional one, so
+the gap opens on most sessions here.
 
-The consequence: dispatches are routinely planned longer than the car needs,
-so the car routinely finishes early -- every time it starts fuller than the
-assumption, which for a car doing normal daily mileage is most sessions. The
-2026-09-04 event is not an edge case, it is the ordinary shape of a session,
-and the gap opens every time.
+Whether it generalises is unproven. Any owner whose car reaches its target
+before the planned window ends meets the same thing -- which on a tariff built
+around "set a target and let it plan" ought to be common -- but that is
+reasoning, not evidence, and this project has been bitten by that difference
+repeatedly.
 
-Bluelink would supply the missing number, and it is the only thing that could:
-there is no vehicle registered with Octopus to ask. But it is an unofficial,
-reverse-engineered API limited to roughly 50 forced refreshes a day, forced
-refreshes wake the car and drain its 12 V battery, accounts do get flagged for
-polling, and it would be a third plaintext credential and the first pip
-dependency in a stdlib-only project. The boundary rule solves the same problem
-reactively, at no cost and with nothing new to hold.
+Nothing in the chain knows the car's state of charge: Octopus integrates with
+the charger, AC charging over Type 2 does not expose SOC to the EVSE, and there
+is no SOC field in the myenergi payload. So neither the agent nor Octopus can
+see the early finish coming. Only observe it.
+
+Bluelink is the only thing that could supply the missing number -- there is no
+vehicle registered with Octopus to ask -- and it is not available to us.
+
+The European login flow is a browser-based OAuth2 journey through
+`idpconnect-eu` that **requires solving a Google reCAPTCHA**, followed by a
+device registration carrying an FCM `pushRegId` plus `ccsp-service-id`,
+`ccsp-application-id` and a derived `Stamp` header. The maintained library has
+open issues on that flow breaking. This is categorically harder than Sigen,
+myenergi or Meross, all of which are plain signed HTTP and were reimplemented
+here in a few hundred stdlib lines. It is also rate-limited to roughly 50 forced
+refreshes a day, a forced refresh wakes the car and drains its 12 V battery, and
+accounts get flagged for polling.
+
+Which is academic anyway: the boundary rule solves the same problem by
+observation, at no cost, with nothing new to hold.
 
 ## What it is worth
 
