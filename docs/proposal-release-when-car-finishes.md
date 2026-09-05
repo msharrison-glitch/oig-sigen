@@ -79,12 +79,38 @@ That distinction is the whole value of having waited for the settlement data.
 Without it the obvious design -- "stop when the car stops" -- would have cost
 more than it saved about half the time.
 
+## Why this is structural, not an edge case
+
+On this setup Octopus integrates with the **charger**, not the car. Nothing in
+the chain knows the car's state of charge: AC charging over Type 2 does not
+expose SOC to the EVSE, and there is no SOC field anywhere in the myenergi
+payload. So Kraken plans from the owner's target and ready-by time plus
+assumptions.
+
+That is visible in the data. The planned dispatch carried `deltaKwh -28`
+against a car that took **7.54 kWh**. Octopus was not stale, it was guessing,
+because it had nothing to be right with.
+
+The consequence: dispatches are routinely planned longer than the car needs,
+so the car routinely finishes early -- every time it starts fuller than the
+assumption, which for a car doing normal daily mileage is most sessions. The
+2026-09-04 event is not an edge case, it is the ordinary shape of a session,
+and the gap opens every time.
+
+Bluelink would supply the missing number, and it is the only thing that could:
+there is no vehicle registered with Octopus to ask. But it is an unofficial,
+reverse-engineered API limited to roughly 50 forced refreshes a day, forced
+refreshes wake the car and drain its 12 V battery, accounts do get flagged for
+polling, and it would be a third plaintext credential and the first pip
+dependency in a stdlib-only project. The boundary rule solves the same problem
+reactively, at no cost and with nothing new to hold.
+
 ## What it is worth
 
-66p on the observed occasion. It recurs whenever the car starts near-full,
-which on this tariff is common. At 11.3 kW each minute past the boundary is
+66p on the observed occasion. At 11.3 kW each minute past the boundary is
 ~5.6p at peak against ~0.8p off-peak, so the cost scales with how long Octopus
-takes to notice -- 18 minutes here, and nothing bounds it.
+takes to notice -- 18 minutes here, and nothing bounds it. Multiply by "most
+sessions" rather than "occasionally".
 
 ## Risks, and what would make this wrong
 
