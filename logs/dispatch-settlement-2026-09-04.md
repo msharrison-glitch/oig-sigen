@@ -78,3 +78,17 @@ STILL TO CHECK, 2026-09-05: does completedDispatches show the
 full 22:01 -> 22:44, or is it truncated to when the car actually drew
 (~22:25)? That decides whether the last 19 minutes billed at 4.49p or
 29.757p -- about GBP 0.81 of difference.
+
+## Follow-up 2026-09-05 20:35 -- the late check does not work
+
+Re-read completedDispatches 21.6 h after the event: returned ZERO records,
+including the three present at 07:12 and 07:47 the same morning. The feed
+either has a sub-day retention window or is scoped to the current charging
+session. A late read cannot tell truncation from lag.
+
+Evidence is therefore fixed at the morning snapshots, where three
+consecutive half-hours were present and the fourth was not.
+
+PRACTICAL LESSON: settlement evidence is perishable. Read
+completedDispatches the same evening, within a couple of hours. By
+morning it may already be gone.
