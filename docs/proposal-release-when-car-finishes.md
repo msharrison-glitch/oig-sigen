@@ -13,6 +13,8 @@ in the middle of a 2¼-hour dispatch.
     22:43:55  SCHEDULE - WITHDRAWN        Octopus pulls the slot, 18 min later
     22:44:07  agent releases              12 s after seeing the withdrawal
 
+<!--FIGURE-->
+
 Next morning, `completedDispatches`, converted to local time:
 
     21:00 -> 21:30   deltaKwh -1

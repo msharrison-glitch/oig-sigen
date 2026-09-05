@@ -1,0 +1,35 @@
+<svg viewBox="0 0 720 208" role="img" aria-label="Timeline from 21:00 to 23:00 showing three completed half-hour dispatches ending at 22:30, and 14 minutes of unsettled charging from 22:30 to 22:44.">
+    <text x="60" y="20" class="t-mut">OCTOPUS SETTLEMENT</text>
+    <rect x="60" y="30" width="450" height="26" fill="var(--cheap-fill)" stroke="var(--cheap)"/>
+    <line x1="210" y1="30" x2="210" y2="56" class="s-rule"/>
+    <line x1="360" y1="30" x2="360" y2="56" class="s-rule"/>
+    <text x="135" y="47" class="t-cheap" text-anchor="middle">&minus;1 kWh</text>
+    <text x="285" y="47" class="t-cheap" text-anchor="middle">&minus;3 kWh</text>
+    <text x="435" y="47" class="t-cheap" text-anchor="middle">&minus;2 kWh</text>
+    <rect x="510" y="30" width="150" height="26" fill="none" stroke="var(--rule)" stroke-dasharray="3 3"/>
+    <text x="585" y="47" class="t-mut" text-anchor="middle">no completion</text>
+
+    <text x="60" y="88" class="t-mut">AGENT</text>
+    <rect x="144" y="98" width="366" height="26" fill="var(--cheap-fill)" stroke="var(--cheap)"/>
+    <rect x="510" y="98" width="71" height="26" fill="var(--costly-fill)" stroke="var(--costly)"/>
+    <text x="327" y="115" class="t-cheap" text-anchor="middle">charging &mdash; settled at 4.49p</text>
+    <text x="545" y="141" class="t-cost" text-anchor="middle">14 min</text>
+    <text x="545" y="154" class="t-cost" text-anchor="middle">2.6 kWh</text>
+    <text x="545" y="167" class="t-cost" text-anchor="middle">unsettled</text>
+
+    <line x1="485" y1="98" x2="485" y2="82" class="s-mut"/>
+    <text x="485" y="78" class="t-ink" text-anchor="middle">car done 22:25</text>
+    <line x1="581" y1="124" x2="581" y2="134" class="s-cost"/>
+
+    <line x1="60" y1="182" x2="660" y2="182" class="s-rule"/>
+    <line x1="60" y1="182" x2="60" y2="188" class="s-rule"/>
+    <line x1="210" y1="182" x2="210" y2="188" class="s-rule"/>
+    <line x1="360" y1="182" x2="360" y2="188" class="s-rule"/>
+    <line x1="510" y1="182" x2="510" y2="188" class="s-rule"/>
+    <line x1="660" y1="182" x2="660" y2="188" class="s-rule"/>
+    <text x="60" y="202" class="t-mut" text-anchor="middle">21:00</text>
+    <text x="210" y="202" class="t-mut" text-anchor="middle">21:30</text>
+    <text x="360" y="202" class="t-mut" text-anchor="middle">22:00</text>
+    <text x="510" y="202" class="t-mut" text-anchor="middle">22:30</text>
+    <text x="660" y="202" class="t-mut" text-anchor="middle">23:00</text>
+  </svg>

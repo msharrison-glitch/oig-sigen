@@ -22,3 +22,6 @@ sigen-dev.md
 
 # working notes -- describes this specific installation
 CLAUDE.md
+
+# Generated -- rebuild with: python3 docs/build_page.py
+docs/settlement-gap.html

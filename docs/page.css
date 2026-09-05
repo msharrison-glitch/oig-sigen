@@ -1,0 +1,84 @@
+:root{
+  --ground:#f7f8fa; --raised:#ffffff; --ink:#12161c; --muted:#5a636f;
+  --rule:#dfe3e9; --accent:#1f5f8b; --cheap:#1f7a5a; --costly:#b0442a;
+  --cheap-fill:#dceee6; --costly-fill:#f6ddd6;
+  --serif:"Source Serif 4",Georgia,"Times New Roman",serif;
+  --sans:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
+  --mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --ground:#10141a; --raised:#171c24; --ink:#e6eaf0; --muted:#8e99a8;
+    --rule:#2a323d; --accent:#6aa9d4; --cheap:#4cbf94; --costly:#e08165;
+    --cheap-fill:#16302a; --costly-fill:#361f19;
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#10141a; --raised:#171c24; --ink:#e6eaf0; --muted:#8e99a8;
+  --rule:#2a323d; --accent:#6aa9d4; --cheap:#4cbf94; --costly:#e08165;
+  --cheap-fill:#16302a; --costly-fill:#361f19;
+}
+*{box-sizing:border-box}
+body{background:var(--ground);color:var(--ink);font-family:var(--sans);
+  line-height:1.65;font-size:16px;margin:0;padding:0}
+.wrap{max-width:53rem;margin:0 auto;padding:3.5rem 1.5rem 6rem}
+h1{font-family:var(--serif);font-size:2.6rem;line-height:1.12;font-weight:600;
+  margin:0 0 .6rem;letter-spacing:-.015em;text-wrap:balance}
+h2{font-family:var(--serif);font-size:1.5rem;font-weight:600;line-height:1.25;
+  margin:3.2rem 0 .9rem;text-wrap:balance}
+h3{font-size:.82rem;font-weight:600;text-transform:uppercase;
+  letter-spacing:.09em;color:var(--muted);margin:2rem 0 .6rem}
+p{margin:0 0 1.05rem;max-width:65ch}
+a{color:var(--accent)}
+code{font-family:var(--mono);font-size:.88em;
+  background:color-mix(in srgb,var(--accent) 9%,transparent);
+  padding:.1em .32em;border-radius:3px}
+.masthead{display:flex;flex-wrap:wrap;gap:.6rem;align-items:center;
+  margin-bottom:1.4rem}
+.badge{font-family:var(--mono);font-size:.72rem;text-transform:uppercase;
+  letter-spacing:.1em;padding:.3em .7em;border:1px solid var(--accent);
+  color:var(--accent);border-radius:2px}
+.meta{font-family:var(--mono);font-size:.8rem;color:var(--muted)}
+.standfirst{font-family:var(--serif);font-size:1.25rem;line-height:1.5;
+  color:var(--muted);max-width:58ch;margin:0 0 2.4rem}
+.rail{border-left:2px solid var(--accent);padding-left:1.1rem;margin:1.6rem 0}
+.fig{margin:2rem 0 2.4rem;overflow-x:auto}
+.fig svg{display:block;min-width:640px;width:100%;height:auto}
+.cap{font-size:.84rem;color:var(--muted);margin-top:.7rem;max-width:62ch}
+.evt{width:100%;border-collapse:collapse;font-family:var(--mono);
+  font-size:.85rem;margin:1.4rem 0}
+.evt td{padding:.42rem .8rem .42rem 0;border-bottom:1px solid var(--rule);
+  vertical-align:baseline}
+.evt td:first-child{white-space:nowrap;color:var(--muted);
+  font-variant-numeric:tabular-nums}
+.evt tr:last-child td{border-bottom:none}
+.evt .hit td{color:var(--costly)}
+pre{font-family:var(--mono);font-size:.84rem;line-height:1.55;
+  background:var(--raised);border:1px solid var(--rule);border-radius:4px;
+  padding:1rem 1.1rem;overflow-x:auto;margin:1.3rem 0}
+ol.steps{list-style:none;counter-reset:s;padding:0;margin:1.3rem 0;
+  display:flex;flex-direction:column;gap:.85rem}
+ol.steps li{counter-increment:s;position:relative;padding-left:2.4rem;
+  max-width:63ch}
+ol.steps li::before{content:counter(s);position:absolute;left:0;top:.05em;
+  font-family:var(--mono);font-size:.78rem;color:var(--accent);
+  border:1px solid var(--rule);border-radius:50%;width:1.55rem;height:1.55rem;
+  display:grid;place-items:center}
+.alts{display:flex;flex-direction:column;gap:0;margin:1.3rem 0;
+  border-top:1px solid var(--rule)}
+.alt{display:grid;grid-template-columns:1fr;gap:.15rem;padding:.95rem 0;
+  border-bottom:1px solid var(--rule)}
+.alt b{font-weight:600}
+.alt span{color:var(--muted);font-size:.93rem;max-width:62ch}
+.verdict{font-family:var(--mono);font-size:.75rem;letter-spacing:.06em;
+  text-transform:uppercase;color:var(--costly)}
+.risk{margin:1.1rem 0;padding-left:1.1rem;border-left:2px solid var(--rule)}
+.risk b{display:block;font-weight:600;margin-bottom:.15rem}
+.risk span{color:var(--muted);font-size:.95rem}
+.foot{margin-top:3.5rem;padding-top:1.2rem;border-top:1px solid var(--rule);
+  font-size:.87rem;color:var(--muted)}
+svg text{font-family:var(--mono);font-size:11px}
+.t-ink{fill:var(--ink)} .t-mut{fill:var(--muted)}
+.t-cheap{fill:var(--cheap)} .t-cost{fill:var(--costly)}
+.s-rule{stroke:var(--rule)} .s-mut{stroke:var(--muted)}
+.s-cost{stroke:var(--costly)} .s-acc{stroke:var(--accent)}
