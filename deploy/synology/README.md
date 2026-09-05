@@ -108,6 +108,19 @@ in /proc instead, and signals it as the admin user that owns it.
 Verified: SIGHUP at 18:38:50, a fresh schedule poll and plant read completed
 at 18:38:55.
 
+Since 2026-09-05 the agent also accepts `--repoll`, which drops a file beside
+the other state and then waits to watch the agent eat it -- so it tells you
+whether anything was listening, where a signal into the void looks identical
+to one that worked:
+
+```sh
+cd ~/oig-sigen && /usr/local/bin/python3.9 reconcile.py --repoll
+```
+
+Run it from the same directory and as the same user as the agent, or the two
+disagree about where the file lives -- the same hazard as the deadman's
+`WorkingDirectory`. `repoll.sh` remains shorter to type and works fine.
+
 ## Without the supervisor: Task Scheduler alone
 
 If you would rather not install a systemd unit, DSM's Task Scheduler can run
