@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -730,11 +731,52 @@ def main() -> int:
                          datetime.now(timezone.utc).isoformat()})
     check("a dead pid is not a conflict",
           reconcile.another_controller_running(), None)
-    control.write_state({"pid": 1, "expires_at":
+    # pid 1 is init on Unix and pid 4 is the System process on Windows:
+    # both are alive, and both refuse an ordinary user -- which is exactly
+    # the case that must read as "alive", never as "gone".
+    foreign = 4 if sys.platform == "win32" else 1
+    control.write_state({"pid": foreign, "expires_at":
                          datetime.now(timezone.utc).isoformat()})
     check("a live foreign pid is a conflict (EPERM still means alive)",
-          reconcile.another_controller_running(), 1)
+          reconcile.another_controller_running(), foreign)
     control.clear_state()
+
+    print("\nThe pid check must never kill what it is checking")
+    check("our own process reads as alive",
+          reconcile.pid_alive(os.getpid()), True)
+    check("a pid that cannot exist reads as dead",
+          reconcile.pid_alive(999_999_999), False)
+    # The bug this pins down: os.kill(pid, 0) is a *test* on Unix and
+    # TerminateProcess on Windows, so on Windows the liveness check would
+    # kill the agent it is asking about -- or, with pids recycled, whatever
+    # now holds that number. The branch must never reach os.kill there.
+    saved_platform, saved_kill = sys.platform, os.kill
+    saved_windows = reconcile._pid_alive_windows
+    terminated: list[tuple] = []
+    try:
+        sys.platform = "win32"
+        os.kill = lambda *a: terminated.append(a)   # TerminateProcess, really
+        reconcile._pid_alive_windows = lambda pid: "asked windows"
+        check("on Windows the question goes to the Windows branch",
+              reconcile.pid_alive(4321), "asked windows")
+        check("and os.kill is never reached", terminated, [])
+    finally:
+        sys.platform = saved_platform
+        os.kill = saved_kill
+        reconcile._pid_alive_windows = saved_windows
+
+    # "Cannot tell" fails OPEN on purpose -- a lease file we are unable to
+    # interpret must not lock the agent out for ever -- so pin the direction.
+    saved_alive = reconcile.pid_alive
+    control.write_state({"pid": 424_242, "expires_at":
+                         datetime.now(timezone.utc).isoformat()})
+    try:
+        reconcile.pid_alive = lambda _pid: None
+        check("a pid we cannot ask about does not block startup",
+              reconcile.another_controller_running(), None)
+    finally:
+        reconcile.pid_alive = saved_alive
+        control.clear_state()
 
     print("\nThe schedule churns overnight, so poll and notice")
     plant_c = make_plant(soc_pct=50.0)
@@ -780,6 +822,56 @@ def main() -> int:
     rec_h._sleep(60.0)                     # would be a minute without it
     check("and the sleep returns at once", _t.monotonic() - t0 < 1.0, True)
     check("the flag is consumed, not sticky", reconcile._refresh, False)
+
+    print("\nThe .repoll trigger, for hosts with no SIGHUP")
+    reconcile.REPOLL_FILE = _TMP / ".repoll-test"
+    reconcile._repoll_broken = False
+    reconcile.clear_repoll_trigger()
+    check("no file -> no request", reconcile.repoll_requested(), False)
+    reconcile.REPOLL_FILE.touch()
+    check("a file -> a request", reconcile.repoll_requested(), True)
+    check("which is consumed, so it fires exactly once",
+          reconcile.REPOLL_FILE.exists(), False)
+    check("a second look sees nothing", reconcile.repoll_requested(), False)
+
+    rec_r = reconciler(make_plant(), FakeOctopus([]))
+    reconcile.REPOLL_FILE.touch()
+    t0 = _t.monotonic()
+    rec_r._sleep(60.0)                     # would be a minute without it
+    check("the trigger cuts a long sleep short",
+          _t.monotonic() - t0 < 1.0, True)
+    check("and the sleep consumed it", reconcile.REPOLL_FILE.exists(), False)
+
+    # A trigger we cannot delete would otherwise fire on every chunk for
+    # ever, re-polling Octopus in a hot loop.
+    reconcile.REPOLL_FILE.touch()
+    saved_unlink = Path.unlink
+
+    def _refuse(self, missing_ok=False):
+        raise PermissionError("read-only")
+
+    try:
+        Path.unlink = _refuse
+        check("an undeletable trigger is ignored, not spun on",
+              reconcile.repoll_requested(), False)
+        check("and is not retried", reconcile.repoll_requested(), False)
+    finally:
+        Path.unlink = saved_unlink
+    reconcile._repoll_broken = False
+    reconcile.clear_repoll_trigger()
+
+    print("\n--repoll reports whether anything actually heard it")
+    check("nobody listening -> failure, not a cheerful no-op",
+          reconcile.request_repoll(timeout=0.5), 1)
+    check("and no trigger is left lying around",
+          reconcile.REPOLL_FILE.exists(), False)
+    import threading
+    consumer = threading.Thread(
+        target=lambda: (_t.sleep(0.3), reconcile.repoll_requested()))
+    consumer.start()
+    check("an agent consuming it -> success",
+          reconcile.request_repoll(timeout=5.0), 0)
+    consumer.join()
 
     print("\nPolling sits on the half-hour grid, at :25 and :55")
     at = lambda h, m: datetime(2026, 1, 15, h, m, tzinfo=timezone.utc)
