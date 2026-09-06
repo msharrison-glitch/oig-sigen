@@ -123,7 +123,7 @@ it is at least visible rather than silent.
 ## Install
 
 ```sh
-git clone https://github.com/<you>/oig-sigen.git
+git clone https://github.com/msharrison-glitch/oig-sigen.git
 cd oig-sigen
 cp .env.example .env      # then fill it in
 ```
@@ -143,6 +143,8 @@ match Sigenergy's password encoding, since Python ships no AES).
 | `MYENERGI_SERIAL` / `_API_KEY` | `--require-zappi` | hub serial, not the Zappi's |
 | `IOG_POLL_CHARGING_SECONDS` | optional | default 30 — how fast a withdrawn slot is caught |
 | `IOG_POLL_IDLE_SECONDS` | optional | default 300 — how fast a new slot is noticed |
+| `IOG_RESUME_BAND_PCT` | optional | default 10 — SOC must fall this far below target before charging resumes, so the release does not chatter |
+| `MYENERGI_USER_AGENT` | optional | only if Cloudflare starts rejecting the default |
 
 ### Check it works before commanding anything
 
@@ -247,10 +249,26 @@ with Remote EMS disabled the whole time.
 
 ## Status
 
-Verified on real hardware (single SigenStor, firmware matching Modbus
-protocol V2.7): grid charging via both Modbus mode 3 and cloud profile
-switching, clean release on a withdrawn slot, power-limit restoration, and
-overnight unattended running.
+One SigenStor, firmware matching Modbus protocol V2.7. Be clear which half
+of this is proven, because the two paths are not equally tested.
+
+**The cloud path (`--via-cloud`) is proven on hardware.** Multiple real bonus
+slots across several nights, unattended: acquiring on a confirmed dispatch,
+releasing on a withdrawal within ~30 s, releasing at a slot boundary,
+stopping at the SOC ceiling, restoring the owner's operational mode, and
+recovering from a transport fault mid-slot.
+
+**The Modbus path has never charged a battery.** Standby (mode 1) and
+discharge (mode 6) were commanded and released on hardware on 2026-08-30, and
+the power-limit restoration was proven by removal the same evening. Grid
+charging -- mode 3, the default when you omit `--via-cloud` -- has not been
+run once. It is the path that *latches* the plant, so it is also the one
+that needs the lease, the deadman and a host that will still be alive to
+release it. If you use it, you are the first.
+
+Everything else -- the lease, the deadman, the two-controller guard, the
+schedule arithmetic -- is covered offline and has not been exercised against
+a real held lease.
 
 Eight offline test suites, no hardware or credentials required:
 
