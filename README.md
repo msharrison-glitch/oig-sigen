@@ -254,11 +254,16 @@ with Remote EMS disabled the whole time.
 One SigenStor, firmware matching Modbus protocol V2.7. Be clear which half
 of this is proven, because the two paths are not equally tested.
 
-**Read the numbers in this repo as belonging to one plant.** It is rated
-12.6 kW charge and 24.18 kWh. A second installation checked on 2026-09-06 is
-52.8 kW and 108.48 kWh -- so every cost figure here, and the rates the
-defaults assume, are a factor of four out on that one. The register map read
-cleanly on both, which is the part that generalises. The arithmetic is not.
+**Read the numbers in this repo as belonging to one plant.** It is single
+phase, 12.6 kW charge, 24.18 kWh. A second installation checked on 2026-09-06
+is three phase, 108.48 kWh of modules behind a 25 kW inverter -- so every cost
+figure here is roughly half what it should be on that one. The register map
+read cleanly on both, which is the part that generalises. The arithmetic is
+not.
+
+Note which rating matters: the ESS modules there are rated 52.8 kW, but the
+inverter limits to 25 kW, and it is the inverter that decides what a stranded
+charge actually costs you.
 
 That second plant also reports real PV power on register 30035, where this
 one reads zero because its solar is on a separate inverter. Same model, same
