@@ -40,6 +40,17 @@ FIGURE_MARKER = "<!--FIGURE-->"
 TITLE = "The Settlement Gap"
 
 
+def _split_on_blank(lines: list[str]) -> list[list[str]]:
+    """Group lines into paragraphs, splitting on blanks."""
+    groups: list[list[str]] = [[]]
+    for ln in lines:
+        if ln:
+            groups[-1].append(ln)
+        elif groups[-1]:
+            groups.append([])
+    return [g for g in groups if g]
+
+
 def inline(text: str) -> str:
     """Inline spans. Escape FIRST, then mark up, so content cannot inject.
 
@@ -156,8 +167,28 @@ def convert(md: str, figure: str) -> str:
                 items.append(item)
             out.append("<ul>" + "".join(f"<li>{inline(x)}</li>"
                                         for x in items) + "</ul>")
-        elif line.startswith(">") or line.startswith("```") \
-                or line.startswith("|"):
+        elif line.startswith(">"):
+            # Added when the proposal needed to quote Octopus directly. The
+            # converter raised rather than rendering the ">" as prose, which
+            # is what it promised to do -- this is that promise being kept
+            # and then paid off, not worked around.
+            flush()
+            quoted: list[str] = []
+            while i < len(lines) and (lines[i].startswith(">")
+                                      or (quoted and not lines[i].strip()
+                                          and i + 1 < len(lines)
+                                          and lines[i + 1].startswith(">"))):
+                if lines[i].startswith(">"):
+                    quoted.append(lines[i].lstrip(">").strip())
+                else:
+                    quoted.append("")          # paragraph break inside a quote
+                i += 1
+            paras = [" ".join(g).strip() for g in
+                     _split_on_blank(quoted)]
+            out.append("<blockquote>"
+                       + "".join(f"<p>{inline(x)}</p>" for x in paras if x)
+                       + "</blockquote>")
+        elif line.startswith("```") or line.startswith("|"):
             raise ValueError(f"line {i+1}: unsupported block syntax {line[:20]!r}"
                              " -- add it to build_page.py rather than letting"
                              " it render as prose")

@@ -130,11 +130,19 @@ observation, at no cost, with nothing new to hold.
 takes to notice -- 18 minutes here, and nothing bounds it. Multiply by "most
 sessions" rather than "occasionally".
 
+Two further details from the same source shape how often this bites. The
+six-hour allowance is measured **midday to midday** and counts only actual
+charging time, so it is a rolling daily budget rather than a per-session one.
+And **Charge Cap** stops the car before it runs into peak rates, which is what
+makes an over-generous request safe for the car -- but says nothing about the
+house battery, which is our problem, not theirs.
+
 ## Risks, and what would make this wrong
 
-**One night of data.** The claim that completions truncate at the boundary
-rests on a single observation. If instead Octopus sometimes back-fills the
-remainder, the whole proposal dissolves. Confirm on a second occasion first.
+**~~One night of data~~ -- superseded.** This said the truncation claim rested
+on one observation and might dissolve entirely. Octopus documents the mechanism
+directly, so what remains unconfirmed is only that their implementation matches
+their own description, on this account, more than once.
 
 **It cannot help `--require-ev` owners.** That path infers the car from
 `completedDispatches`, which lag by up to half an hour -- so a non-Zappi owner
@@ -175,10 +183,14 @@ to 30 minutes, which is the very window we are trying to close.
 
 ## Before building
 
-Wait for a second night where the car finishes mid-dispatch, then read
-`completedDispatches` **the same evening, within a couple of hours**. If
-completions truncate again, build it. If they do not, delete this file and keep
-the current behaviour.
+The mechanism is no longer in question -- Octopus documents it. What is still
+unconfirmed is narrower: that their *implementation* matches the description,
+on this account, more than once.
+
+So: next time the car finishes mid-dispatch, read `completedDispatches`
+**the same evening, within a couple of hours**. One more consistent
+observation is enough. This is confirming documented behaviour rather than
+establishing unknown behaviour, which is a much cheaper thing to ask for.
 
 ### Why not just re-read last night's data instead
 
@@ -199,3 +211,24 @@ So the evidence stays fixed at the morning reads, which are the sound kind of
 comparison -- within one snapshot, three consecutive half-hours present and the
 fourth absent. For that to be lag, one record would have had to be ten times
 slower than its immediate neighbours.
+
+### And Octopus documents the mechanism, which settles it
+
+From their own explanation of Intelligent Octopus Go:
+
+> your home **also** gets the off-peak rate for that half-hour when it's
+> within your car allowance
+
+> If you unplug before that half hour started then the home (and car) won't
+> get that lower rate in that half hour
+
+Three things fall out of those two sentences. The **half-hour is the billing
+unit**, which is the entire basis of the rule above. The discount reaches the
+**whole home**, not only the car -- the formal T&Cs promise the night rate
+"for your EV charging", and this project is worth nothing if that narrower
+reading is the operative one. And a half-hour with **no charging in it gets no
+discount**, which is the truncation reading, stated by the supplier rather than
+inferred by us.
+
+So the 66p was real, and the mechanism is documented rather than deduced.
+Source: <https://octopus.energy/blog/intelligent-octopus-go-smarter-charging-for-a-greener-grid/>

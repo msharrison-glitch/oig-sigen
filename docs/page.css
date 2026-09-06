@@ -82,3 +82,9 @@ svg text{font-family:var(--mono);font-size:11px}
 .t-cheap{fill:var(--cheap)} .t-cost{fill:var(--costly)}
 .s-rule{stroke:var(--rule)} .s-mut{stroke:var(--muted)}
 .s-cost{stroke:var(--costly)} .s-acc{stroke:var(--accent)}
+blockquote{margin:1.3rem 0;padding:.2rem 0 .2rem 1.2rem;
+  border-left:3px solid var(--accent);color:var(--muted);
+  font-family:var(--serif);font-size:1.05rem}
+blockquote p{margin:0 0 .6rem;max-width:60ch}
+blockquote p:last-child{margin-bottom:0}
+
