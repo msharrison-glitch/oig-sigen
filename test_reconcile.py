@@ -133,6 +133,11 @@ def main() -> int:
     reconcile.DISPATCH_POLL_INTERVAL = 30.0
     reconcile.CONFIRM_POLL_INTERVAL = 30.0
     reconcile.RESUME_BAND_PCT = 10.0
+    # And the declared restore mode, for the same reason: an owner who has
+    # set IOG_RESTORE_MODE in .env must not turn this suite red. Caught
+    # immediately after adding the key, which is the second time a new
+    # override has done this -- pin every one of them here as it is added.
+    reconcile._configured_restore = lambda: None
     control.STATE_FILE = _TMP / ".lease-reconcile-test.json"
     control.clear_state()
 
@@ -632,6 +637,61 @@ def main() -> int:
           (kept or {}).get("restore_mode"), 1)
     check("the plant really is still on the charge profile",
           dc.current_mode()["currentMode"], 9)
+    sigencloud.clear_cloud_state()
+
+    print("\nA declared restore mode beats anything read from the plant")
+    # DEFAULT_RESTORE_MODE is Sigen AI, which is right for the plant this was
+    # written on and wrong for anyone else. An owner on Maximum Self-Powered
+    # would be moved to Sigen AI after every slot, silently. Declaring it
+    # also removes the poisoned-reading class outright: there is no reading.
+    sigencloud.clear_cloud_state()
+    saved = reconcile._configured_restore
+    try:
+        reconcile._configured_restore = lambda: (0, -1)   # Max Self-Powered
+        plant_r = make_plant(soc_pct=40.0)
+        rc = FakeCloud(mode=9)
+        rc.profile = 9664          # poisoned: we are already on OUR profile
+        rec_r2 = reconcile.Reconciler(client_for(plant_r), FakeOctopus([live_c]),
+                                      5.0, 95.0, bonus_only=True, cloud=rc,
+                                      charge_profile_id=9664)
+        check("charges as normal", rec_r2.tick(now), "STARTED charging")
+        st_r = sigencloud.read_cloud_state()
+        check("records what the OWNER declared, not what the plant said",
+              (st_r["restore_mode"], st_r["restore_profile"]), (0, -1))
+        rc.sets.clear()
+        rec_r2.octopus.slots = []
+        check("and releases to it", rec_r2.tick(now), "RELEASED")
+        check("restored to the declared mode", rc.sets, [(0, -1)])
+    finally:
+        reconcile._configured_restore = saved
+        sigencloud.clear_cloud_state()
+
+    print("\nA mode only we could have set is never a restore target")
+    check("our charge profile is ours",
+          reconcile.is_our_own_mode(9, 9664, 9664), True)
+    check("Remote EMS is ours -- that is what a lease looks like",
+          reconcile.is_our_own_mode(reconcile.R.EMS_WORK_MODE_REMOTE_EMS,
+                                    -1, 9664), True)
+    check("Sigen AI is the owner's", reconcile.is_our_own_mode(1, -1, 9664),
+          False)
+    check("someone else's custom profile is the owner's",
+          reconcile.is_our_own_mode(9, 5555, 9664), False)
+
+    # The Modbus path had NEITHER protection: a run that died holding a lease
+    # left the plant on Remote EMS, and the restart would record mode 7 as
+    # "what the owner had" and restore the plant to it.
+    pl_m = make_plant(soc_pct=40.0)
+    mc = RestoreCloud(mode=reconcile.R.EMS_WORK_MODE_REMOTE_EMS, profile=-1)
+    rec_m = reconcile.Reconciler(client_for(pl_m), FakeOctopus([live_r]),
+                                 5.0, 95.0, bonus_only=True)
+    rec_m.cloud_restore_client = mc
+    rec_m.restore_mode_via_cloud = True
+    rec_m.charge_profile_id = 9664
+    check("Modbus path still charges", rec_m.tick(now), "STARTED charging")
+    check("but does NOT record Remote EMS as the owner's mode",
+          rec_m._mode_before_lease,
+          (reconcile.DEFAULT_RESTORE_MODE, -1))
+    control.clear_state()
     sigencloud.clear_cloud_state()
 
     print("\nCloud actuation refuses to switch blind")

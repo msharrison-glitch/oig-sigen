@@ -143,6 +143,8 @@ match Sigenergy's password encoding, since Python ships no AES).
 | `MYENERGI_SERIAL` / `_API_KEY` | `--require-zappi` | hub serial, not the Zappi's |
 | `IOG_POLL_CHARGING_SECONDS` | optional | default 30 — how fast a withdrawn slot is caught |
 | `IOG_POLL_IDLE_SECONDS` | optional | default 300 — how fast a new slot is noticed |
+| `IOG_RESTORE_MODE` | **set this** | the mode to put your plant back on after a slot. Without it the agent infers it from the plant, which is correct by luck rather than design — and the fallback is Sigen AI, so an owner on Maximum Self-Powered or TOU is silently moved. `sigencloud.py --list` shows yours |
+| `IOG_RESTORE_PROFILE` | if the above is a custom profile | its id, from `--list` |
 | `IOG_RESUME_BAND_PCT` | optional | default 10 — SOC must fall this far below target before charging resumes, so the release does not chatter |
 | `MYENERGI_USER_AGENT` | optional | only if Cloudflare starts rejecting the default |
 

@@ -189,6 +189,58 @@ def _resume_band() -> float:
 
 RESUME_BAND_PCT = _resume_band()
 
+def _configured_restore() -> tuple[int, int] | None:
+    """The owner's declared operational mode, or None if they did not say.
+
+    Everything else here infers it: read the plant immediately before
+    switching and remember what it said. That reading is only as good as the
+    moment it is taken, and the moment can be poisoned -- on 2026-09-03 a
+    crashed run left the plant on the charging profile, the restart read that
+    as "the owner's mode", and would have restored the plant INTO charging.
+
+    Declaring it removes the whole class rather than guarding each site. It
+    also fixes something worse for anyone who is not this project's original
+    owner: DEFAULT_RESTORE_MODE is Sigen AI, so an owner on Maximum
+    Self-Powered or TOU would be moved to a mode they never chose after every
+    slot, silently, with nothing in the log to explain it.
+    """
+    try:
+        env = load_env()
+    except ConfigError:
+        return None
+    raw = (env.get("IOG_RESTORE_MODE") or "").strip()
+    if not raw:
+        return None
+    try:
+        mode = int(raw)
+    except ValueError:
+        log.warning("IOG_RESTORE_MODE=%r is not a number; ignoring it and "
+                    "falling back to reading the plant", raw)
+        return None
+    try:
+        profile = int((env.get("IOG_RESTORE_PROFILE") or "-1").strip())
+    except ValueError:
+        profile = -1
+    return mode, profile
+
+
+def is_our_own_mode(mode, profile, charge_profile_id) -> bool:
+    """Could only WE have put the plant here? Then it is not a restore target.
+
+    Two ways that happens, and neither is ever an owner's selection:
+    the charging profile we select on the cloud path, and Remote EMS, which
+    is what a Modbus lease looks like from the cloud's side. Seeing either
+    means a previous run died mid-slot without restoring.
+
+    The cloud path has guarded the first since d767ac9. The Modbus path
+    guarded neither, so a run that died holding a lease could have mode 7
+    recorded as "what the owner had" -- the same bug, one path over.
+    """
+    if charge_profile_id is not None and profile == charge_profile_id:
+        return True
+    return mode == R.EMS_WORK_MODE_REMOTE_EMS
+
+
 # What to put the plant back on when we have no better answer. 1 is Sigen AI,
 # which is what this project assumes the owner runs -- the whole point is to
 # patch one blind spot in it, not to replace it. Owners on another mode should
@@ -679,19 +731,19 @@ class Reconciler:
             log.error("cannot read the current mode; refusing to switch "
                       "without knowing how to switch back")
             return "idle (mode unreadable)"
-        if restore_profile == self.charge_profile_id:
-            # Finding the plant already on OUR charging profile is never the
-            # owner's own selection: it means a previous run switched it and
-            # then died before restoring. Recording it would make the release
-            # "restore" the plant INTO charging, at peak rate, and the
-            # deadman would agree with it. Observed 2026-09-03, when an
-            # expired cloud token killed the agent mid-slot; the restart
-            # wrote restore_mode 9 / profile 9664 and would have left the
-            # plant importing 11.4 kW past the slot.
-            log.error("plant is already on charge profile %s -- a previous "
-                      "run died mid-slot. Recording mode %d as the restore "
-                      "target instead, NOT the charge profile.",
-                      self.charge_profile_id, DEFAULT_RESTORE_MODE)
+        declared = _configured_restore()
+        if declared is not None:
+            restore_mode, restore_profile = declared
+        elif is_our_own_mode(restore_mode, restore_profile,
+                             self.charge_profile_id):
+            # Only we could have put it here, so a previous run died mid-slot.
+            # Recording it would make the release restore the plant INTO
+            # charging, at peak rate, and the deadman would agree.
+            log.error("plant is on a mode only we could have set (mode %s, "
+                      "profile %s) -- a previous run died mid-slot. Recording "
+                      "%d instead. Set IOG_RESTORE_MODE to say what yours "
+                      "should be.", restore_mode, restore_profile,
+                      DEFAULT_RESTORE_MODE)
             restore_mode, restore_profile = DEFAULT_RESTORE_MODE, -1
         # State BEFORE the switch, exactly as the Modbus lease does: if we
         # die between here and the restore, the deadman still knows what to
@@ -771,9 +823,24 @@ class Reconciler:
             # losing the mode beats not charging, but the owner should know.
             try:
                 import sigencloud
-                before = self.cloud_restore_client.current_mode()
-                self._mode_before_lease = (before.get("currentMode"),
-                                           before.get("currentProfileId", -1))
+                declared = _configured_restore()
+                if declared is not None:
+                    self._mode_before_lease = declared
+                else:
+                    before = self.cloud_restore_client.current_mode()
+                    mode = before.get("currentMode")
+                    profile = before.get("currentProfileId", -1)
+                    if is_our_own_mode(mode, profile, self.charge_profile_id):
+                        # Mode 7 is what a lease looks like from the cloud.
+                        # Recording it would "restore" the plant to Remote
+                        # EMS -- the state we are trying to leave.
+                        log.error("plant is on a mode only we could have set "
+                                  "(mode %s) -- a previous run died holding a "
+                                  "lease. Recording %d instead. Set "
+                                  "IOG_RESTORE_MODE to say what yours should "
+                                  "be.", mode, DEFAULT_RESTORE_MODE)
+                        mode, profile = DEFAULT_RESTORE_MODE, -1
+                    self._mode_before_lease = (mode, profile)
                 # Persist it NOW, not after the release. Held only in memory,
                 # this knowledge dies with the process -- and a dead agent is
                 # exactly when the owner is least likely to notice their plant
