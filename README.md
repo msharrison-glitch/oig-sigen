@@ -254,6 +254,16 @@ with Remote EMS disabled the whole time.
 One SigenStor, firmware matching Modbus protocol V2.7. Be clear which half
 of this is proven, because the two paths are not equally tested.
 
+**Read the numbers in this repo as belonging to one plant.** It is rated
+12.6 kW charge and 24.18 kWh. A second installation checked on 2026-09-06 is
+52.8 kW and 108.48 kWh -- so every cost figure here, and the rates the
+defaults assume, are a factor of four out on that one. The register map read
+cleanly on both, which is the part that generalises. The arithmetic is not.
+
+That second plant also reports real PV power on register 30035, where this
+one reads zero because its solar is on a separate inverter. Same model, same
+firmware, different wiring. Assume nothing about a plant you have not read.
+
 **The cloud path (`--via-cloud`) is proven on hardware.** Multiple real bonus
 slots across several nights, unattended: acquiring on a confirmed dispatch,
 releasing on a withdrawal within ~30 s, releasing at a slot boundary,

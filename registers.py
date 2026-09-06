@@ -216,8 +216,14 @@ PLANT_ACTIVE_POWER = Register(
     30031, "Plant active power", "s32", False, gain=1000, unit="kW",
 )
 
+# Reads 0.00 on an installation whose solar is on a SEPARATE inverter -- the
+# SigenStor then sees generation only as its net effect at the grid sensor.
+# That is a property of the wiring, not of the hardware: a second plant seen
+# 2026-09-06, with PV on the SigenStor's own MPPTs, reports 1.05 kW here.
+# Do not infer "this plant has no solar" from a zero.
 PV_POWER = Register(
     30035, "PV power", "s32", False, gain=1000, unit="kW",
+    note="0.00 when PV is on a separate inverter; real when on the MPPTs.",
 )
 
 ESS_POWER = Register(

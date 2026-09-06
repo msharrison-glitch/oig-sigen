@@ -375,7 +375,11 @@ def deadman(client: "SigenCloud | None" = None) -> int:
     The cloud path has no lease and nothing latches at the plant -- but if we
     select a charging profile and then fail to switch back (API down, token
     expired, process killed), the plant charges at the profile's rate until
-    someone notices. At 8 kW on peak that is about GBP 2.38 an hour. So the
+    someone notices. At 8 kW on peak that is about GBP 2.38 an hour -- on the
+    plant this was written for. Scale it to YOURS before trusting it: a second
+    install seen 2026-09-06 is rated 52.8 kW charge against 12.6 kW here, so
+    the same stranded charge there costs nearer GBP 15 an hour. The mechanism
+    is identical; only the bill differs. So the
     same discipline as the Modbus lease applies: record the intent before
     acting, and give a separate process enough to clean up.
 
