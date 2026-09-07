@@ -26,7 +26,7 @@ Check the first three in one go:
 
 ```sh
 uname -m                # armv7l, aarch64, x86_64 ...
-python3 --version       # must be 3.9+
+python3 --version       # DSM 7.4's own is 3.8 -- see below, this is NOT enough
 openssl version         # only if you want --via-cloud
 systemctl --version     # absent on DSM 6
 ```
@@ -34,13 +34,22 @@ systemctl --version     # absent on DSM 6
 Not needed: RAM, disk or CPU worth measuring. The agent runs in tens of MB and
 sleeps between ticks.
 
-**The unit is written for an account called `admin`.** Both
-`deploy/synology/oig-sigen.service` (`User=admin`,
-`WorkingDirectory=/var/services/homes/admin/oig-sigen`) and the `SRC=` line in
-`install-service.sh` hardcode that path. If you run as a different user — or
-if you later disable the `admin` account, which DSM 7 encourages — edit both
-before installing. State lives beside the scripts, so a deadman running as the
-wrong user reads no `.lease.json` and silently protects nothing.
+**The unit is generated, not shipped.** `install-service.sh` renders
+`oig-sigen.service.in` into the real unit each run, substituting what it finds
+on *this* NAS: the interpreter, the account that owns the project directory,
+and the directory itself. So no account name or Python path is baked in, and
+running as something other than `admin` — which DSM 7 encourages — needs no
+edit. State lives beside the scripts, so a deadman running as the wrong user
+reads no `.lease.json` and silently protects nothing; deriving the user from
+the directory's owner is what stops that happening.
+
+Override any of it in `agent.conf` beside the scripts (gitignored, so it
+survives an update): set `PY=`, `RUN_USER=` or `ARGS=`.
+
+An earlier version of this file said both the unit and a `SRC=` line hardcoded
+`/var/services/homes/admin/oig-sigen`. That was true, and it is why the first
+install on a second NAS — a different user, and Python 3.13 rather than 3.9 —
+would have produced a unit pointing at an interpreter that was not there.
 
 ## Why there is a supervisor script at all
 
@@ -77,9 +86,17 @@ The next run of the task picks it up and restarts within five minutes.
 
 ## Gotchas
 
-- **Python is not there by default.** Install Python 3.9 from Package Center
-  (community). It lands at `/usr/local/bin/python3.9`, which is why the unit
-  names that path explicitly rather than `python3`.
+- **DSM's own `python3` is too old, and it fails in the worst way.** On DSM
+  7.4.1 `/usr/bin/python3` is 3.8, which has no `zoneinfo` — 3.9+ only — so
+  `octopus.py` dies on the import. Under `Restart=always` that is a crash
+  loop every `RestartSec`, forever, looking like a service that is running.
+  Install **Python 3** from Package Center; it lands in `/usr/local/bin/` as
+  `python3.9`, `python3.13` or similar depending on the version offered.
+  `install-service.sh` picks the newest one that can actually `import
+  zoneinfo`, testing the requirement rather than parsing a version string, so
+  you do not have to tell it which. Measured 2026-09-07 on a DS920+ (DSM
+  7.4.1): system 3.8.15 fails four of the eight suites on the import;
+  `/usr/local/bin/python3.13` passes all eight.
 - **`scp` fails** with `subsystem request failed on channel 0` — DSM serves no
   sftp subsystem. Use `scp -O`, or pipe: `cat f | ssh nas 'cat > path/f'`.
 - **`ps` and `pgrep -f` are BusyBox** and will not find processes you know are
@@ -114,7 +131,7 @@ whether anything was listening, where a signal into the void looks identical
 to one that worked:
 
 ```sh
-cd ~/oig-sigen && /usr/local/bin/python3.9 reconcile.py --repoll
+cd ~/oig-sigen && /usr/local/bin/python3.13 reconcile.py --repoll   # your path may differ
 ```
 
 Run it from the same directory and as the same user as the agent, or the two
@@ -128,9 +145,19 @@ the whole thing. Three entries, all as a user that owns the directory:
 
 | Task | Type | Runs |
 |---|---|---|
-| agent | Triggered Task → Boot-up | `cd /volume1/oig-sigen && nohup python3 reconcile.py --bonus-only --require-ev >/dev/null 2>&1 &` |
-| deadman | Scheduled Task, every 5 min | `cd /volume1/oig-sigen && python3 control.py --deadman` |
-| cloud deadman | Scheduled Task, every 5 min | `cd /volume1/oig-sigen && python3 sigencloud.py --deadman` |
+| agent | Triggered Task → Boot-up | `cd /volume1/oig-sigen && nohup $PY reconcile.py --bonus-only --require-ev >/dev/null 2>&1 &` |
+| deadman | Scheduled Task, every 5 min | `cd /volume1/oig-sigen && $PY control.py --deadman` |
+| cloud deadman | Scheduled Task, every 5 min | `cd /volume1/oig-sigen && $PY sigencloud.py --deadman` |
+
+**Write the real interpreter into each of those three, not `python3`.** These
+tasks bypass `install-service.sh`, so nothing detects it for you, and bare
+`python3` is DSM's 3.8. Find the path once:
+
+```sh
+for c in /usr/local/bin/python3.1? /usr/local/bin/python3.9; do
+    [ -x "$c" ] && "$c" -c 'import zoneinfo' 2>/dev/null && echo "$c"
+done
+```
 
 `--require-ev` is the charger-agnostic gate: it takes Octopus's own
 `completedDispatches` as evidence the car is drawing, so it works with any

@@ -1,0 +1,31 @@
+# Template. install-service.sh renders this into the real unit, substituting
+# @PY@, @USER@, @DIR@ and @ARGS@ for what it finds on THIS NAS. Do not install
+# this file directly, and do not hardcode a path back into it: the whole point
+# is that admin/python3.9 on one machine is bilalharrison/python3.13 on another.
+[Unit]
+Description=OIG to SigenStor reconciliation agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+WorkingDirectory=@DIR@
+# --require-zappi asks a myenergi Zappi directly, with no lag. For any other
+# IOG charger use --require-ev instead, which infers the car from Octopus's
+# own completedDispatches and lags by up to half an hour. Set ARGS in
+# agent.conf to change this without editing the template.
+ExecStart=@PY@ @DIR@/reconcile.py @ARGS@
+
+# Release is wired to SIGTERM; 5-25s actuation, so give it room before SIGKILL.
+KillSignal=SIGTERM
+TimeoutStopSec=90
+
+# Belt and braces. Idempotent, and a no-op when nothing is held.
+ExecStopPost=@PY@ @DIR@/control.py release
+
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

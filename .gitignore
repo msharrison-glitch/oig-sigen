@@ -27,3 +27,8 @@ CLAUDE.md
 
 # Generated -- rebuild with: python3 docs/build_page.py
 docs/settlement-gap.html
+
+# per-NAS install overrides and generated unit
+agent.conf
+.oig-sigen.service.rendered
+service-status.txt
