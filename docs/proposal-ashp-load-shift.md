@@ -46,14 +46,18 @@ constant:
 
 That is the same order as the battery's ~8.4p round-trip margin, not better.
 
-And it is per kWh of *electricity*. At COP 3 a kWh of *heat* needs a third of
-that, so per kWh of heat delivered the figure is roughly **3-6.5p**. Any
-estimate that quotes the spread against heat rather than electricity is
-inflated threefold.
+And it is per kWh of *electricity*. The figure per kWh of **heat** must be
+read off the COP table in the next section, not obtained by dividing this one
+by three: it is the difference between the two compressor rows -- 4.3-7.9p to
+make that heat later from the battery, against 1.5p to make it during a bonus
+slot -- so **2.8-6.4p per kWh of heat delivered**. Any estimate that quotes
+the electricity spread against heat is inflated roughly threefold.
 
-Realistic magnitude: near nil in September; **£10-25/month in deep winter**,
-depending on how much load actually lands inside bonus slots. Worth a weekend
-of code. Not worth £400 of hardware.
+Realistic magnitude: near nil in September; **£10-25/month in deep winter**.
+Note what that requires: at 2.8-6.4p per kWh of heat, £10-25/month means
+**5-12 kWh of shifted heat every day** landing inside bonus slots. That is a
+lot of bonus-slot minutes in a cold month, and it is the assumption most
+likely to be optimistic. Worth a weekend of code. Not worth £400 of hardware.
 
 ## The decisive unknown: which lever keeps the compressor running
 
@@ -215,7 +219,10 @@ no risk to the heating.
 1. Compressor or immersion under `powerfulMode`? Decides the DHW lever.
 2. Which setpoint mode is configured? Decides the space-heating lever.
 3. How much load actually lands inside bonus slots in winter? The £10-25/month
-   estimate is arithmetic, not observation.
+   estimate is arithmetic, not observation, and it needs 5-12 kWh of shifted
+   heat per day to hold. Bonus slots are driven by the car's schedule, so the
+   binding constraint may be how many slot-minutes exist at all, not how much
+   heat the house can absorb. Measure before believing.
 4. Does bumping the curve mid-slot and dropping it 30 minutes later cause
    short-cycling? A 30-minute slot is short for a heat pump.
 5. **Main fuse headroom.** During a bonus slot the agent already draws ~10 kW
