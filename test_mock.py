@@ -73,7 +73,7 @@ class MockPlant(threading.Thread):
                 pdu = self._recv(conn, length - 1)
                 if not pdu:
                     return
-                reply = self._handle(pdu)
+                reply = self._handle_pdu(pdu)
                 conn.sendall(
                     struct.pack(">HHHB", txn, 0, len(reply) + 1, 247) + reply
                 )
@@ -88,7 +88,10 @@ class MockPlant(threading.Thread):
             buf += chunk
         return buf
 
-    def _handle(self, pdu: bytes) -> bytes:
+    # NOT `_handle`. From Python 3.13 threading.Thread.__init__ sets an
+    # instance attribute of that name (a _thread._ThreadHandle), which
+    # shadows the method and fails with "object is not callable".
+    def _handle_pdu(self, pdu: bytes) -> bytes:
         fc = pdu[0]
         if self.faults > 0:
             self.faults -= 1
