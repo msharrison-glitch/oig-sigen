@@ -131,6 +131,13 @@ cp .env.example .env      # then fill it in
 Nothing to install. Python 3.9+ and, for the cloud path, `openssl` (used to
 match Sigenergy's password encoding, since Python ships no AES).
 
+**3.9 is a floor, not a preference**, and worth checking rather than assuming:
+`octopus.py` imports `zoneinfo`, which arrived in 3.9. A Synology NAS is the
+trap here — DSM 7.4's own `python3` is 3.8, so the agent dies on that import,
+and under a `Restart=always` unit that becomes a crash loop that still reports
+as running. Install Python 3 from Package Center and point the unit at it;
+`deploy/synology/install-service.sh` finds it for you.
+
 ### Configure
 
 | Variable | Needed for | Notes |
