@@ -73,6 +73,15 @@ if [ -f "$SRC/.restart-requested" ]; then
     rm -f "$SRC/.restart-requested"
 fi
 
+# The template must travel with this script. If it does not, sed fails, set -e
+# exits, and the two deadmen at the bottom never run -- every five minutes,
+# forever, while looking healthy. Fail loudly into the status file instead.
+if [ ! -f "$HERE/oig-sigen.service.in" ]; then
+    echo "$(date): oig-sigen.service.in missing beside $0 -- copy BOTH files" > "$OUT"
+    chown "$RUN_USER" "$OUT" 2>/dev/null || true
+    exit 1
+fi
+
 RENDERED="$SRC/.oig-sigen.service.rendered"
 sed -e "s|@PY@|$PY|g" -e "s|@USER@|$RUN_USER|g" \
     -e "s|@DIR@|$SRC|g" -e "s|@ARGS@|$ARGS|g" \

@@ -88,9 +88,11 @@ class MockPlant(threading.Thread):
             buf += chunk
         return buf
 
-    # NOT `_handle`. From Python 3.13 threading.Thread.__init__ sets an
-    # instance attribute of that name (a _thread._ThreadHandle), which
-    # shadows the method and fails with "object is not callable".
+    # NOT `_handle`. Python 3.13's threading.Thread.__init__ sets an instance
+    # attribute of that name (a _thread._ThreadHandle), which shadows this
+    # method and fails with "object is not callable". 3.12 and earlier do not
+    # set it and 3.14 renamed it to _os_thread_handle, so the clash is 3.13.x
+    # only -- testing solely on the newest Python would miss it.
     def _handle_pdu(self, pdu: bytes) -> bytes:
         fc = pdu[0]
         if self.faults > 0:

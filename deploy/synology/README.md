@@ -65,7 +65,10 @@ Create a scheduled task:
 - Control Panel -> Task Scheduler -> Create -> Scheduled Task -> User-defined script
 - **User: root**
 - Schedule: daily, repeat **every 5 minutes**
-- Command: `/var/services/homes/admin/oig-sigen/install-service.sh`
+- Command: `<project directory>/install-service.sh` — e.g.
+  `/var/services/homes/admin/oig-sigen/install-service.sh`. Whatever path you
+  use, `oig-sigen.service.in` must sit beside it and `reconcile.py` must be in
+  that directory or two levels up; the script derives everything else.
 
 `install-service.sh` is idempotent and does four things: installs the unit if
 it changed, restarts only when it actually changed, starts the agent if it is
@@ -172,6 +175,15 @@ that cannot read `.lease.json` silently protects nothing.
 **No Docker on ARM models.** DSM's Docker/Container Manager package is x86
 only, so ignore the Dockerfile. Copy the `.py` files and `.env` to a share and
 run them directly — being dependency-free, there is nothing else to install.
+
+**If you use the supervisor, copy `install-service.sh` and
+`oig-sigen.service.in` together.** The script renders the unit from the
+template beside it, so the template is not optional documentation — it is an
+input. Copying only the script is the likelier mistake because that is all the
+older flow needed. It now fails loudly into `service-status.txt` rather than
+half-running: without the guard, `sed` would fail, `set -e` would exit, and
+*both deadmen at the end of the script would never run* — every five minutes,
+indefinitely, while the task itself looked fine.
 
 ## Stopping it again is not just `kill`
 
