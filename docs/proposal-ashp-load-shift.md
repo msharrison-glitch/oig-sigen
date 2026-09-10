@@ -1,10 +1,11 @@
 # Proposal: shift the heat pump into bonus slots
 
-Status: **researched, not built, and not yet measured on the plant.** Written
-2026-09-07 from the Daikin Onecta API, the Home Assistant integration's
-source, and the Homey app's published Flow cards. Nothing here has touched a
-heat pump. The first step below is read-only and settles the one question that
-decides whether the rest is worth building.
+Status: **read-only step DONE 2026-09-10; nothing built, nothing written to
+the unit.** Originally written 2026-09-07 from the Onecta API, the Home
+Assistant integration's source and the Homey app's Flow cards. It has since
+been checked against the real plant with `daikin.py --raw`, and the measured
+findings are in "What the unit actually exposes" below. Two of the guesses
+were wrong, and both are corrected in place rather than quietly amended.
 
 The heat pump is not in use for heating as of 2026-09-07. Heating season is
 weeks away, which is the whole reason to answer this now rather than in
@@ -88,13 +89,25 @@ the weather-compensation curve and keeps the compressor running, so the full
 spread applies. Shifting a setpoint hard makes the unit cycle; shifting the
 curve makes it run harder at similar efficiency.
 
-Ranking, subject to measurement:
+Ranking, **revised 2026-09-10 against the real unit**:
 
-1. `leavingWaterOffset` on `climateControl` -- compressor, full spread.
-2. `domesticHotWaterTemperature` setpoint -- compressor, bounded, tank holds
-   the heat well.
-3. `powerfulMode` -- probably the immersion. Verify before using; may be
-   worth nothing.
+1. **`leavingWaterOffset` on `climateControl`** -- settable, -10..+10, step 1,
+   currently +5. Shifts the weather curve, compressor keeps running, full
+   spread applies. Confirmed available. Earns only in the heating season.
+2. **`onOffMode` on `domesticHotWaterTank`** -- settable. Not in the original
+   ranking at all, and it may be the better half of the opportunity: hot
+   water is ~1,200 kWh/year against space heating's ~1,700, and unlike
+   heating it runs ALL YEAR. Suppress the tank through expensive periods,
+   release it during a bonus slot, and the reheat lands at 4.49p. Crude
+   compared with a setpoint nudge, but it is what this unit exposes.
+3. ~~`domesticHotWaterTemperature` setpoint~~ -- **not available.** Ranked
+   second in the original on the assumption it was settable. It is
+   `read-only` on this unit (value=50, min=30, max=75). The compressor-driven
+   tank reheat this proposal wanted cannot be commanded directly.
+4. `powerfulMode` -- settable, but still suspected of running the immersion at
+   COP ~1, which the table above shows is barely better than doing nothing.
+   Unmeasured. A clue that the tank can draw heavily: September 2025 shows
+   380 kWh against 46-153 kWh in the months either side.
 
 ## The API
 
@@ -137,6 +150,68 @@ Two constraints that shape the design:
 - **A GET immediately after a PATCH returns stale data.** The reference
   implementation waits 10 s. Same read-back-to-verify discipline as
   `set_mode_verified`.
+
+## What the unit actually exposes
+
+Measured 2026-09-10 with `daikin.py --raw`, one call out of 200. This replaces
+the guesswork above; where the two disagree, this section is right.
+
+    device      Altherma, type heating-wlan, online
+    indoor      EDLA04E2V3        gateway BRP069A78 fw 4.1.0
+
+    climateControl / climateControlMainZone
+        controlMode          roomTemperature      read-only
+        setpointMode         weatherDependent     read-only
+        onOffMode            off                  SETTABLE
+        leavingWaterOffset   5   (-10..10, step 1)  SETTABLE   <-- the lever
+        roomTemperature      21  (12..30, step 0.5) SETTABLE
+        sensors: leavingWater 17, outdoor 16, room 22.4
+
+    domesticHotWaterTank
+        setpointMode                 fixed            read-only
+        heatupMode                   reheatSchedule   read-only
+        domesticHotWaterTemperature  50 (30..75)      READ-ONLY  <-- not a lever
+        powerfulMode                 off              SETTABLE
+        onOffMode                    on               SETTABLE   <-- the lever
+        sensors: tankTemperature 46
+
+`weatherDependent` with a settable `leavingWaterOffset` is the best case for
+space heating: the unit keeps running its own curve and we nudge it, which is
+the same relationship this project has with Sigen AI.
+
+### Consumption history comes free in the same payload
+
+`consumptionData.electrical` carries `unit: "kWh"` and 24 monthly buckets --
+**two calendar years, not a rolling window**. Index 0-11 is the previous year,
+12-23 the current one; the proof is that the trailing entries are `null`
+because those months have not happened. Getting this wrong makes heating look
+like it peaks in September, which is how the mistake was caught.
+
+                       2025      2026 (Jan-Sep)
+    space heating      1684 kWh       1346 kWh
+    hot water          1317 kWh        914 kWh
+
+Heating is Nov-Apr only, peaking at 429 (Dec 2025) and 602 (Jan 2026). Hot
+water runs every month of the year. 2026 is running well above 2025 -- 602 vs
+378 in January -- so the shiftable quantity is larger than the 2025 column
+suggests.
+
+Two consequences:
+
+- **The business case can be measured rather than estimated.** A representative
+  winter month is ~430 kWh of electricity for heating; at the 8.5-19.5p spread,
+  shifting 20-30% of it is roughly **GBP 12-18/month**, which lands in the
+  lower half of the range this proposal originally guessed. It also
+  cross-checks: 86 kWh/month is ~2.9 kWh/day of electricity, or ~8.7 kWh/day of
+  heat at COP 3, inside the 5-12 kWh/day the estimate requires.
+- **Hot water is not the sideshow it was treated as.** 1,200 kWh/year, spread
+  across all twelve months, against heating's 1,700 concentrated in four or
+  five. A DHW lever earns in July; a heating lever does not.
+
+Anomaly worth recording: **September 2025 shows 380 kWh for hot water** against
+46-153 in the surrounding months. Cause unknown, a year old, self-corrected.
+Noted because it demonstrates the tank is capable of drawing several times its
+normal load -- consistent with, though not proof of, an immersion heater.
 
 ## Why our architecture fits the rate limit and Homey's does not
 
@@ -216,8 +291,18 @@ no risk to the heating.
 
 ## Open questions
 
-1. Compressor or immersion under `powerfulMode`? Decides the DHW lever.
-2. Which setpoint mode is configured? Decides the space-heating lever.
+1. Compressor or immersion under `powerfulMode`? Still open, and now less
+   important, because `onOffMode` gives a DHW lever that does not depend on
+   the answer.
+2. ~~Which setpoint mode is configured?~~ **Answered:** `weatherDependent`
+   with `controlMode = roomTemperature`, and `leavingWaterOffset` settable.
+   The best case.
+6. Does releasing `onOffMode` on the tank actually trigger a reheat inside a
+   30-minute slot, or does `heatupMode = reheatSchedule` defer it to the
+   unit's own schedule? This decides whether lever 2 works at all.
+7. How much of the DHW load is genuinely deferrable without running out of
+   hot water? Suppressing the tank has a comfort failure mode that shifting
+   a heating curve does not.
 3. How much load actually lands inside bonus slots in winter? The £10-25/month
    estimate is arithmetic, not observation, and it needs 5-12 kWh of shifted
    heat per day to hold. Bonus slots are driven by the car's schedule, so the
