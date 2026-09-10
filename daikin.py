@@ -163,6 +163,11 @@ def _post_form(url: str, fields: dict) -> dict:
 
 def authorize_url(env: dict) -> str:
     """Step one: the URL the owner opens in a browser."""
+    # Check the credentials BEFORE touching the token file, or a user who
+    # has not filled in .env yet gets a stray file created and then an error.
+    client_id = _need(env, "DAIKIN_CLIENT_ID")
+    _need(env, "DAIKIN_CLIENT_SECRET")
+
     state = secrets.token_urlsafe(24)
     stored = _read_tokens()
     stored["pending_state"] = state
@@ -170,7 +175,7 @@ def authorize_url(env: dict) -> str:
 
     query = urllib.parse.urlencode({
         "response_type": "code",
-        "client_id": _need(env, "DAIKIN_CLIENT_ID"),
+        "client_id": client_id,
         "redirect_uri": _redirect_uri(env),
         "scope": SCOPE,
         "state": state,
@@ -198,6 +203,11 @@ def exchange_code(env: dict, redirected: str) -> None:
     stored = _read_tokens()
     expected = stored.get("pending_state")
     got = (params.get("state") or [None])[0]
+    # No stored state means we cannot check it -- the token file was deleted
+    # between the two commands, or this URL came from another machine. We
+    # proceed rather than refuse: this is a local CLI where the owner pastes
+    # a URL they just fetched themselves, so there is no third party to
+    # forge one. The check exists to catch a stale paste, not an attacker.
     if expected and got != expected:
         raise DaikinError(
             "state mismatch -- this URL is not from the --auth-url we just "
