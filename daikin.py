@@ -81,6 +81,10 @@ SCOPE = "openid onecta:basic.integration offline_access"
 
 TIMEOUT = 30.0
 TOKEN_FILE = ".daikin-token.json"
+# Append-only. See snapshot(): the API keeps two calendar years and
+# silently drops the older one every January, so this file is the only
+# thing that will still know what 2025 cost once 2027 begins.
+HISTORY_FILE = ".daikin-history.jsonl"
 
 # Refresh this long before expiry rather than waiting to be refused. The
 # agent's ticks are minutes apart, so a token that expires between deciding
@@ -296,7 +300,20 @@ def gateway_devices(env: dict) -> tuple:
 
 
 # --------------------------------------------------------------------------
-# what the unit actually offers
+# reading the payload
+#
+# Written against a real Altherma payload captured 2026-09-10, not against
+# other people's source. Two things in the real shape are easy to get wrong
+# and both are handled here:
+#
+#   - consumptionData.electrical carries a STRING "unit" key alongside the
+#     operation-mode dicts, so anything that assumes every value is a dict
+#     crashes on it.
+#   - the 24 monthly buckets are two CALENDAR years, not a rolling window.
+#     Index 0-11 is last year, 12-23 this year, and the trailing entries are
+#     null because those months have not happened. Reading them as "the last
+#     24 months" makes heating appear to peak in September.
+
 
 # The setpoint the installer configured decides the strategy, so call it out
 # rather than leaving it buried in the dump.
@@ -307,62 +324,161 @@ SETPOINT_NOTES = {
         "workable, but moving flow temperature directly has a big COP cost",
     "roomTemperature":
         "workable, but setpoint jumps make the unit cycle",
+    "domesticHotWaterTemperature":
+        "read-only on some units -- check before designing around it",
 }
+
+MONTH_NAMES = ("January", "February", "March", "April", "May", "June", "July",
+               "August", "September", "October", "November", "December")
+
+
+def management_points(payload: list):
+    """(device, management point) pairs, so callers stop re-walking the tree."""
+    for device in payload or []:
+        for point in device.get("managementPoints", []) or []:
+            yield device, point
+
+
+def setpoints(point: dict) -> dict:
+    """{(operation mode, setpoint name): spec} for one management point."""
+    control = point.get("temperatureControl") or {}
+    modes = (control.get("value") or {}).get("operationModes") or {}
+    found = {}
+    for mode_name, mode in modes.items():
+        for name, spec in ((mode or {}).get("setpoints") or {}).items():
+            if isinstance(spec, dict):
+                found[(mode_name, name)] = spec
+    return found
+
+
+def sensors(point: dict) -> dict:
+    """{name: value} from sensoryData, flattened."""
+    data = (point.get("sensoryData") or {}).get("value") or {}
+    return {k: v.get("value") for k, v in data.items()
+            if isinstance(v, dict) and "value" in v}
+
+
+def consumption(point: dict, this_year: int = None) -> dict:
+    """Monthly electrical consumption, labelled with real calendar months.
+
+    Returns {"unit": "kWh", "monthly": [(year, month_number, value), ...]}
+    with the null future months dropped. See the note above about why these
+    are calendar years rather than a rolling window.
+    """
+    node = (point.get("consumptionData") or {}).get("value") or {}
+    electrical = node.get("electrical") or {}
+    unit = electrical.get("unit") if isinstance(
+        electrical.get("unit"), str) else None
+
+    buckets = None
+    for mode, series in electrical.items():
+        if not isinstance(series, dict):
+            continue                       # the "unit" string lives here too
+        if isinstance(series.get("m"), list):
+            buckets = series["m"]
+            break
+    if not buckets:
+        return {}
+
+    if this_year is None:
+        import datetime
+        this_year = datetime.date.today().year   # injectable, so the calendar
+                                                 # mapping can be tested
+    out = []
+    for index, value in enumerate(buckets[:24]):
+        if value is None:
+            continue
+        year = this_year - 1 + (index // 12)
+        out.append((year, index % 12 + 1, value))
+    return {"unit": unit, "monthly": out}
+
+
+def snapshot(payload: list) -> dict:
+    """One flat, append-able record of everything worth keeping.
+
+    Deliberately includes the consumption arrays. The monthly window is two
+    calendar years, so 2025 disappears on 1 January 2027 exactly as 2024
+    already has -- archiving on every poll is the only way to end up with a
+    continuous record, and it costs no extra API calls because it arrives in
+    the same payload.
+    """
+    record = {"fetched_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+              "points": {}}
+    for device, point in management_points(payload):
+        kind = point.get("managementPointType")
+        if kind not in ("climateControl", "domesticHotWaterTank"):
+            continue
+        record.setdefault("device", device.get("deviceModel"))
+        entry = {
+            "embeddedId": point.get("embeddedId"),
+            "onOffMode": (point.get("onOffMode") or {}).get("value"),
+            "operationMode": (point.get("operationMode") or {}).get("value"),
+            "controlMode": (point.get("controlMode") or {}).get("value"),
+            "setpointMode": (point.get("setpointMode") or {}).get("value"),
+            "powerfulMode": (point.get("powerfulMode") or {}).get("value"),
+            "sensors": sensors(point),
+            "setpoints": {f"{mode}/{name}": spec.get("value")
+                          for (mode, name), spec in setpoints(point).items()},
+            "consumption": consumption(point),
+        }
+        record["points"][kind] = entry
+    return record
 
 
 def describe(payload: list) -> None:
-    for device in payload:
-        print(f"\ndevice {device.get('id', '?')}  "
-              f"({device.get('deviceModel', 'unknown model')})  "
-              f"online={device.get('isCloudConnectionUp', {}).get('value')}")
+    for device, point in management_points(payload):
+        kind = point.get("managementPointType")
+        if kind == "gateway":
+            print(f"\ndevice: {device.get('deviceModel')}  "
+                  f"type={device.get('type')}  online="
+                  f"{(device.get('isCloudConnectionUp') or {}).get('value')}")
+            continue
+        if kind not in ("climateControl", "domesticHotWaterTank"):
+            continue
 
-        for point in device.get("managementPoints", []) or []:
-            kind = point.get("managementPointType", "?")
-            embedded = point.get("embeddedId", "?")
-            print(f"  management point: {kind}   embeddedId={embedded}")
+        print(f"\n[{kind}]  embeddedId={point.get('embeddedId')}")
+        for name in ("onOffMode", "operationMode", "controlMode",
+                     "setpointMode", "heatupMode", "powerfulMode"):
+            node = point.get(name)
+            if isinstance(node, dict) and "value" in node:
+                mark = "SETTABLE" if node.get("settable") else "read-only"
+                print(f"    {name:24s} {str(node['value']):18s} [{mark}]")
 
-            for name, value in sorted(point.items()):
-                if name in ("managementPointType", "embeddedId"):
-                    continue
-                if not isinstance(value, dict):
-                    continue
-                print(f"      {name}: {_brief(value)}")
-                if name == "temperatureControl":
-                    _describe_setpoints(value)
-
-
-def _brief(node: dict) -> str:
-    if "value" in node and not isinstance(node["value"], (dict, list)):
-        settable = node.get("settable")
-        suffix = "" if settable is None else ("  settable" if settable
-                                              else "  read-only")
-        return f"{node['value']}{suffix}"
-    return "(nested)"
-
-
-def _describe_setpoints(control: dict) -> None:
-    """Pull the setpoint names out, because they decide the whole design."""
-    modes = (control.get("value") or {}).get("operationModes") or {}
-    for mode_name, mode in sorted(modes.items()):
-        setpoints = (mode or {}).get("setpoints") or {}
-        for setpoint, spec in sorted(setpoints.items()):
-            note = SETPOINT_NOTES.get(setpoint, "")
-            detail = ""
-            if isinstance(spec, dict):
-                bits = [f"value={spec.get('value')}"]
-                if "minValue" in spec:
-                    bits.append(f"min={spec['minValue']}")
-                if "maxValue" in spec:
-                    bits.append(f"max={spec['maxValue']}")
-                if "stepValue" in spec:
-                    bits.append(f"step={spec['stepValue']}")
-                if spec.get("settable") is not None:
-                    bits.append("settable" if spec["settable"]
-                                else "read-only")
-                detail = "  ".join(bits)
-            print(f"        setpoint [{mode_name}] {setpoint}: {detail}")
+        for (mode, name), spec in sorted(setpoints(point).items()):
+            mark = "SETTABLE" if spec.get("settable") else "READ-ONLY"
+            rng = ""
+            if "minValue" in spec:
+                rng = (f"({spec.get('minValue')}..{spec.get('maxValue')}"
+                       f", step {spec.get('stepValue')})")
+            print(f"    setpoint [{mode}] {name}: {spec.get('value')} "
+                  f"{rng} [{mark}]")
+            note = SETPOINT_NOTES.get(name)
             if note:
-                print(f"            ^ {note}")
+                print(f"        ^ {note}")
+
+        read = sensors(point)
+        if read:
+            print("    sensors: " + ", ".join(
+                f"{k}={v}" for k, v in sorted(read.items())))
+
+        used = consumption(point)
+        if used.get("monthly"):
+            unit = used.get("unit") or "?"
+            total = {}
+            for year, _month, value in used["monthly"]:
+                total[year] = total.get(year, 0) + value
+            summary = "  ".join(f"{y}: {t} {unit}"
+                                for y, t in sorted(total.items()))
+            print(f"    consumption: {summary}"
+                  "   (2 calendar years; the older one is lost each January)")
+
+
+def append_history(record: dict) -> str:
+    """One JSON object per line. Never rewrites, so a crash cannot eat it."""
+    path = state_path(HISTORY_FILE)
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, sort_keys=True) + "\n")
+    return str(path)
 
 
 def main() -> int:
@@ -374,6 +490,9 @@ def main() -> int:
                         help="the URL you were redirected to, in quotes")
     parser.add_argument("--raw", action="store_true",
                         help="dump the whole payload as JSON")
+    parser.add_argument("--snapshot", action="store_true",
+                        help="append one observation to the history file "
+                             "(one API call; safe to schedule)")
     args = parser.parse_args()
 
     try:
@@ -398,6 +517,14 @@ def main() -> int:
         payload, remaining = gateway_devices(env)
         if args.raw:
             print(json.dumps(payload, indent=2))
+        elif args.snapshot:
+            record = snapshot(payload)
+            where = append_history(record)
+            climate = record.get("points", {}).get("climateControl", {})
+            print(f"appended to {where}")
+            print(f"  {record['fetched_at']}  "
+                  f"heating={climate.get('onOffMode')}  "
+                  f"sensors={climate.get('sensors')}")
         else:
             describe(payload)
         if remaining is not None:
