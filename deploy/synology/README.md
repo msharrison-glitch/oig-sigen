@@ -185,6 +185,37 @@ half-running: without the guard, `sed` would fail, `set -e` would exit, and
 *both deadmen at the end of the script would never run* — every five minutes,
 indefinitely, while the task itself looked fine.
 
+## Optional: observing the heat pump
+
+`daikin-snapshot.sh` appends one Daikin Onecta observation to
+`.daikin-history.jsonl`, and folds that poll's monthly consumption into
+`.daikin-consumption.json`. Read-only -- `daikin.py` has no write path at all,
+and its test asserts that against the source.
+
+A **separate** Task Scheduler entry, not part of the supervisor:
+
+- Control Panel -> Task Scheduler -> Create -> Scheduled Task -> User-defined
+- **User: the account that owns the project directory** (NOT root). The token
+  is 0600 and the history files must stay writable by the same user the agent
+  runs as; a root-owned history file locks the owner out of appending to it.
+- Schedule: daily, repeat **every 30 minutes**, last run time **23:55**
+- Command: `<project directory>/daikin-snapshot.sh`
+
+**Why it is separate from `install-service.sh`.** That script is the deadman,
+and it runs every five minutes. Polling Daikin 288 times a day would exceed
+their 200/day limit before lunch, and mixing an optional feature into the one
+script that hands the plant back is not a trade worth making.
+
+**The budget is the reason for the throttle.** The Onecta API allows 200
+requests per day per application, cannot be raised, and requests made while
+rate-limited *extend* the block. So the script refuses to poll more often than
+`MIN_GAP` (1700s, just under 29 minutes) no matter how often it is invoked --
+the schedule can be wrong without being expensive. Thirty-minute polling costs
+48 calls a day.
+
+It exits 0 and does nothing if `DAIKIN_CLIENT_ID` is absent from `.env`, so a
+NAS without a heat pump is unaffected.
+
 ## Stopping it again is not just `kill`
 
 With the supervisor installed the agent is a systemd unit with

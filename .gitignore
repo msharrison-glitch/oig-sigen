@@ -39,3 +39,5 @@ service-status.txt
 # Daikin observation history and per-month consumption archive
 .daikin-history.jsonl
 .daikin-consumption.json
+.daikin-snapshot.log
+daikin-snapshot.log
