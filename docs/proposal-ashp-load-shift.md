@@ -208,10 +208,58 @@ Two consequences:
   across all twelve months, against heating's 1,700 concentrated in four or
   five. A DHW lever earns in July; a heating lever does not.
 
-Anomaly worth recording: **September 2025 shows 380 kWh for hot water** against
-46-153 in the surrounding months. Cause unknown, a year old, self-corrected.
-Noted because it demonstrates the tank is capable of drawing several times its
-normal load -- consistent with, though not proof of, an immersion heater.
+### Why 2025 is not the baseline: a solar diverter was in play
+
+Context from the owner, 2026-09-10, and unrecoverable from the data alone: a
+SolarEdge diverter used to send surplus solar to the hot water tank. It was
+stopped shortly after the Sigen was installed, in favour of exporting instead.
+
+Summer is the clean test, because a diverter only acts when there is surplus:
+
+    DHW, Jun-Aug   2025:  52, 46, 54   (mean 51)
+                   2026:  70, 67, 67   (mean 68)      +34%
+
+So through summer 2025 roughly a third of the tank's load was not on the heat
+pump at all, and the Daikin's own figures understate it. **Plan from the 2026
+column.** The true current tank load is ~67 kWh/month in summer and 150-175 in
+winter -- call it 1,200-1,400 kWh/year, all of it now through the compressor
+and all of it deferrable.
+
+The owner's decision was right, and for this project's own reasoning: a
+diverter converts 1 kWh of electricity into 1 kWh of heat (COP 1), where
+exporting it earns 13-24p and the heat pump can make the same heat later from
+0.33 kWh at COP 3. That is the same argument that makes `powerfulMode`
+suspect.
+
+Not explained by the diverter: **January-February roughly doubled too**
+(92, 90 -> 174, 147), and there is no surplus solar to divert in January. Some
+other change coincided -- setpoint, schedule, or usage. Unresolved, and not
+worth chasing.
+
+Anomaly, unresolved: **September 2025 shows 380 kWh for hot water** against
+46-153 either side, with space heating at zero that month. That is 12.7
+kWh/day -- about four times a normal compressor-driven tank, and very close to
+what a 3 kW resistive element running 4-5 hours a day would draw. The Altherma
+EDLA's own backup heater is included in these figures, so a booster left
+enabled when the diverter was decommissioned would fit; so would several other
+things. The owner does not recall, the daily and weekly arrays only reach back
+two days and two weeks, and the Onecta app reads the same window -- **the
+evidence needed to diagnose it no longer exists.** Recorded anyway, because it
+proves something in that tank circuit can draw 12-13 kWh/day, which is a
+resistive element and not a compressor.
+
+### The observer MUST archive these arrays
+
+The window is two calendar years, not rolling. On 1 January 2027 the buckets
+shift and **2025 is gone permanently** -- as 2024 already is; it was in this
+same array a year ago and no parameter asks for it back.
+
+So the observer appends the consumption arrays to a local file on every poll.
+This costs zero extra API calls, because they arrive in the same payload as
+everything else. After a couple of years that yields a continuous record
+rather than a two-year window, and -- more to the point -- the before/after
+evidence for whether any of this actually saves money, which no amount of
+arithmetic can supply.
 
 ## Why our architecture fits the rate limit and Homey's does not
 
