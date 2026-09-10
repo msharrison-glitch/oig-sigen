@@ -39,7 +39,12 @@ if [ -f "$HISTORY" ]; then
     then_=$(date -r "$HISTORY" +%s 2>/dev/null || stat -c %Y "$HISTORY")
     gap=$((now - then_))
     if [ "$gap" -lt "$MIN_GAP" ]; then
-        exit 0                    # too soon; silently skip
+        # Record the skip. A silent success is indistinguishable from a task
+        # that never fired, and "did the scheduler actually run this?" is the
+        # first question asked when no data appears.
+        echo "$(date): skipped, last poll ${gap}s ago (min ${MIN_GAP}s)" \
+            >> "$LOG"
+        exit 0
     fi
 fi
 
