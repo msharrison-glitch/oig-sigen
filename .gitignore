@@ -32,3 +32,6 @@ docs/settlement-gap.html
 agent.conf
 .oig-sigen.service.rendered
 service-status.txt
+
+# Daikin OAuth refresh token, mode 0600
+.daikin-token.json
