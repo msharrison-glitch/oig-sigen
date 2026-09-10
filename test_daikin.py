@@ -194,8 +194,11 @@ def main() -> int:
     check("the offset is recorded as a value",
           snap["points"]["climateControl"]["setpoints"]
           ["heating/leavingWaterOffset"], 5)
-    check_true("consumption is archived, not just read",
-               snap["points"]["climateControl"]["consumption"]["monthly"])
+    # Consumption is deliberately NOT inlined here: it changes monthly while
+    # sensors change constantly, and repeating 21 months into every record
+    # quadrupled the history file for no information.
+    check("consumption is not repeated into every observation",
+          "consumption" in snap["points"]["climateControl"], False)
     check("the gateway is not archived", "gateway" in snap["points"], False)
     check_true("it round-trips through JSON", json.dumps(snap))
 
@@ -205,6 +208,24 @@ def main() -> int:
     lines = io.open(first, encoding="utf-8").read().strip().splitlines()
     check("two appends, two lines", len(lines), 2)
     check("the first is still there", json.loads(lines[0])["fetched_at"], "a")
+
+    print("\nConsumption is merged by month, so it outlives the API's window")
+    path, months, added = daikin.merge_consumption(FIXTURE)
+    check("21 distinct months recorded", months, 21)
+    check_true("every value counted as new the first time", added == 42)
+    store = json.loads(io.open(path, encoding="utf-8").read())
+    check("keyed YYYY-MM", "2026-01" in store, True)
+    check("both kinds under one month",
+          sorted(k for k in store["2026-01"] if k != "unit"),
+          ["climateControl", "domesticHotWaterTank"])
+    check("January 2026 heating is 602", store["2026-01"]["climateControl"],
+          602)
+    check("the unit travels with the figure", store["2026-01"]["unit"], "kWh")
+
+    # Polling every half hour must not grow the file or re-count anything.
+    path, months2, added2 = daikin.merge_consumption(FIXTURE)
+    check("merging again adds no months", months2, 21)
+    check("and changes no values", added2, 0)
 
     print("\nThe authorisation URL")
     env = {"DAIKIN_CLIENT_ID": "cid", "DAIKIN_CLIENT_SECRET": "sec"}

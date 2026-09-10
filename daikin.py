@@ -85,6 +85,11 @@ TOKEN_FILE = ".daikin-token.json"
 # silently drops the older one every January, so this file is the only
 # thing that will still know what 2025 cost once 2027 begins.
 HISTORY_FILE = ".daikin-history.jsonl"
+# Consumption is kept SEPARATELY and keyed by month, not repeated into every
+# observation. The arrays change once a month while sensors change constantly,
+# so inlining them multiplied the history file by roughly four for no
+# information at all.
+CONSUMPTION_FILE = ".daikin-consumption.json"
 
 # Refresh this long before expiry rather than waiting to be refused. The
 # agent's ticks are minutes apart, so a token that expires between deciding
@@ -419,7 +424,6 @@ def snapshot(payload: list) -> dict:
             "sensors": sensors(point),
             "setpoints": {f"{mode}/{name}": spec.get("value")
                           for (mode, name), spec in setpoints(point).items()},
-            "consumption": consumption(point),
         }
         record["points"][kind] = entry
     return record
@@ -473,6 +477,41 @@ def describe(payload: list) -> None:
                   "   (2 calendar years; the older one is lost each January)")
 
 
+def merge_consumption(payload: list) -> tuple:
+    """Fold this poll's monthly figures into a permanent per-month record.
+
+    Keyed by "YYYY-MM" and merged rather than appended, so polling every half
+    hour costs nothing extra and the file stays the size of the history it
+    covers. This is what outlives the API's two-calendar-year window: once
+    2027 begins, 2025 exists here and nowhere else.
+    """
+    path = state_path(CONSUMPTION_FILE)
+    try:
+        with open(path, encoding="utf-8") as handle:
+            store = json.load(handle)
+    except (FileNotFoundError, ValueError):
+        store = {}
+
+    added = 0
+    for _device, point in management_points(payload):
+        kind = point.get("managementPointType")
+        if kind not in ("climateControl", "domesticHotWaterTank"):
+            continue
+        used = consumption(point)
+        unit = used.get("unit") or "kWh"
+        for year, month, value in used.get("monthly", []):
+            key = f"{year}-{month:02d}"
+            entry = store.setdefault(key, {})
+            if entry.get(kind) != value:
+                added += 1
+            entry[kind] = value
+            entry["unit"] = unit
+
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(store, handle, indent=2, sort_keys=True)
+    return str(path), len(store), added
+
+
 def append_history(record: dict) -> str:
     """One JSON object per line. Never rewrites, so a crash cannot eat it."""
     path = state_path(HISTORY_FILE)
@@ -520,11 +559,14 @@ def main() -> int:
         elif args.snapshot:
             record = snapshot(payload)
             where = append_history(record)
+            store, months, changed = merge_consumption(payload)
             climate = record.get("points", {}).get("climateControl", {})
             print(f"appended to {where}")
             print(f"  {record['fetched_at']}  "
                   f"heating={climate.get('onOffMode')}  "
                   f"sensors={climate.get('sensors')}")
+            print(f"consumption: {months} months on record in {store}"
+                  f"  ({changed} value(s) updated this poll)")
         else:
             describe(payload)
         if remaining is not None:

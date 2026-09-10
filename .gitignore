@@ -35,3 +35,7 @@ service-status.txt
 
 # Daikin OAuth refresh token, mode 0600
 .daikin-token.json
+
+# Daikin observation history and per-month consumption archive
+.daikin-history.jsonl
+.daikin-consumption.json
