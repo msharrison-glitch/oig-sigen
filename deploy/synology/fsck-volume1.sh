@@ -95,7 +95,7 @@ fi
 
 log "--- state before ---"
 free -m >> "$LOG" 2>&1
-dumpe2fs -h "$DEV" 2>/dev/null | grep -iE "Filesystem state|Inode count|Block count|Last checked" >> "$LOG"
+tune2fs -l "$DEV" 2>/dev/null | grep -iE "Filesystem state|Inode count|Block count|Last checked" >> "$LOG"
 
 # ---------------------------------------------------------------- quiesce
 log "--- stopping packages ---"
@@ -109,15 +109,40 @@ for d in synoindexd synomkthumbd synomkflvd synomkflvd synoindexplugind; do
 done
 
 # ---------------------------------------------------------------- unmount
+# fuser and lsof are BOTH absent on DSM 7.4.1, so holders have to be found
+# by walking /proc: cwd, exe, root and every open fd. Without this the unmount
+# fails, the script aborts, and the NAS reboots having achieved nothing.
+kill_holders() {
+    sig=$1
+    for pp in /proc/[0-9]*; do
+        pid=${pp#/proc/}
+        [ "$pid" = "$$" ] && continue
+        [ "$pid" = "1" ] && continue
+        hit=no
+        for l in "$pp/cwd" "$pp/exe" "$pp/root"; do
+            t=$(readlink "$l" 2>/dev/null)
+            case "$t" in "$VOLUME"/*) hit=yes;; esac
+        done
+        if [ "$hit" = "no" ]; then
+            for fd in "$pp"/fd/*; do
+                t=$(readlink "$fd" 2>/dev/null) || continue
+                case "$t" in "$VOLUME"/*) hit=yes; break;; esac
+            done
+        fi
+        if [ "$hit" = "yes" ]; then
+            kill -"$sig" "$pid" 2>/dev/null && \
+                log "  kill -$sig $pid ($(cat "$pp/comm" 2>/dev/null))"
+        fi
+    done
+}
+
 log "--- unmounting $VOLUME ---"
 UNMOUNTED=no
 i=1
 while [ $i -le 6 ]; do
     if umount "$VOLUME" 2>>"$LOG"; then UNMOUNTED=yes; break; fi
     log "  attempt $i failed; killing holders"
-    if command -v fuser >/dev/null 2>&1; then
-        fuser -km "$VOLUME" >/dev/null 2>&1
-    fi
+    if [ $i -le 2 ]; then kill_holders TERM; else kill_holders KILL; fi
     sleep 5
     i=$((i + 1))
 done
@@ -143,7 +168,9 @@ log "unmount confirmed -- $VOLUME is not in /proc/mounts"
 # ---------------------------------------------------------------- repair
 log "--- running e2fsck -fy $DEV  (hours; no progress output) ---"
 START=$(date +%s)
-e2fsck -fy "$DEV" >> "$LOG" 2>&1
+E2FSCK=$(command -v e2fsck || echo /sbin/e2fsck)
+log "using $E2FSCK"
+"$E2FSCK" -fy "$DEV" >> "$LOG" 2>&1
 RC=$?
 ELAPSED=$(( $(date +%s) - START ))
 log "e2fsck finished after ${ELAPSED}s with exit code $RC"
@@ -161,7 +188,7 @@ case $RC in
 esac
 
 log "--- state after ---"
-dumpe2fs -h "$DEV" 2>/dev/null | grep -iE "Filesystem state|Last checked" >> "$LOG"
+tune2fs -l "$DEV" 2>/dev/null | grep -iE "Filesystem state|Last checked" >> "$LOG"
 
 rm -f "$LOCK"
 rm -f "$SELF_TMP"

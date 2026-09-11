@@ -35,8 +35,11 @@ grep -E "^md|blocks|recovery|resync" /proc/mdstat 2>/dev/null
 echo
 
 echo "--- filesystem ---"
+# NOT dumpe2fs: it is not installed on DSM 7.4.1, which is why the first run
+# of this script printed nothing here. tune2fs -l reports the same superblock
+# fields and IS present.
 if [ -n "$DEV" ]; then
-    dumpe2fs -h "$DEV" 2>/dev/null | grep -iE \
+    tune2fs -l "$DEV" 2>/dev/null | grep -iE \
         "Filesystem state|Errors behavior|Inode count|Block count|Block size|Free blocks|Free inodes|Last checked|Mount count|Filesystem features"
 fi
 echo
@@ -45,18 +48,18 @@ echo "--- memory, and whether e2fsck can fit ---"
 free -m 2>/dev/null
 echo
 if [ -n "$DEV" ]; then
-    INODES=$(dumpe2fs -h "$DEV" 2>/dev/null | awk -F: '/Inode count/ {gsub(/ /,"",$2); print $2}')
-    BLOCKS=$(dumpe2fs -h "$DEV" 2>/dev/null | awk -F: '/^Block count/ {gsub(/ /,"",$2); print $2}')
+    # df works even with no ext2 tools at all, so it is the reliable source.
+    INODES=$(df -i "$VOLUME" 2>/dev/null | awk 'NR==2 {print $2}')
+    BLOCKS=$(df -B4096 "$VOLUME" 2>/dev/null | awk 'NR==2 {print $2}')
     AVAIL=$(awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo)
     if [ -n "$INODES" ] && [ -n "$BLOCKS" ]; then
-        # Rough but honest: e2fsck holds several bitmaps over blocks plus
-        # per-inode structures. A commonly used field estimate is about
-        # (blocks/8 + inodes*4) bytes, so state it as an order of magnitude
-        # rather than a promise.
-        EST=$(( (BLOCKS / 8 + INODES * 4) / 1048576 ))
+        # e2fsck's fixed cost is bitmaps: roughly six over inodes (1 bit
+        # each) and two or three over blocks (1 bit each), plus per-used-inode
+        # structures. Order of magnitude, not a promise.
+        EST=$(( (INODES / 8 * 6 + BLOCKS / 8 * 3) / 1048576 ))
         echo "inodes:        $INODES"
         echo "blocks:        $BLOCKS"
-        echo "rough e2cfsk working set: ~${EST} MB   (order of magnitude, not a guarantee)"
+        echo "rough e2fsck working set: ~${EST} MB   (order of magnitude, not a guarantee)"
         echo "MemAvailable:  ${AVAIL} MB"
         if [ "$EST" -gt "$AVAIL" ]; then
             echo "VERDICT:       TIGHT OR INSUFFICIENT -- scratch_files is essential"
