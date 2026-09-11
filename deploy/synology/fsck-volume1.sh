@@ -26,20 +26,58 @@
 VOLUME=${VOLUME:-/volume1}
 LOG=/var/log/fsck-volume1.log          # md0, NOT the volume being checked
 LOCK=/var/run/fsck-volume1.lock
-SELF_TMP=/tmp/.fsck-volume1-running.sh
+MARKER=.fsck-volume1-running.sh
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S'): $*" >> "$LOG"; }
 
+# Where can we copy ourselves to? Two requirements, and the first attempt at
+# this got the second one wrong: the directory must NOT be on the volume we
+# are about to unmount, and it must permit execution. /tmp satisfies the
+# first and fails the second -- it is mounted noexec on DSM, so setsid
+# reported "Permission denied" and the run died before doing anything.
+pick_workdir() {
+    for d in /var/tmp /root /usr/local/bin /dev/shm /tmp; do
+        [ -d "$d" ] || continue
+        case "$(df "$d" 2>/dev/null | awk 'NR==2 {print $6}')" in
+            "$VOLUME"|"$VOLUME"/*) continue ;;   # would vanish at unmount
+        esac
+        t="$d/.fsck-exectest.$$"
+        printf '#!/bin/sh\nexit 0\n' > "$t" 2>/dev/null || continue
+        chmod 700 "$t" 2>/dev/null
+        if "$t" 2>/dev/null; then rm -f "$t"; echo "$d"; return 0; fi
+        rm -f "$t"
+    done
+    return 1
+}
+
 # ---------------------------------------------------------------- relaunch
 case "$0" in
-    "$SELF_TMP") ;;                    # already detached, carry on
+    *"$MARKER") ;;                     # already detached, carry on
     *)
         [ "$(id -u)" = "0" ] || { echo "must run as root" >&2; exit 1; }
+        WORKDIR=$(pick_workdir) || {
+            log "ABORT: no directory is both off $VOLUME and exec-capable"
+            echo "no usable working directory; see $LOG" >&2
+            exit 1
+        }
+        SELF_TMP="$WORKDIR/$MARKER"
         cp "$0" "$SELF_TMP" || exit 1
         chmod 700 "$SELF_TMP"
-        log "relaunching detached from $SELF_TMP"
+        if [ ! -x "$SELF_TMP" ]; then
+            log "ABORT: $SELF_TMP is not executable after chmod"
+            exit 1
+        fi
+        log "relaunching detached from $SELF_TMP (workdir $WORKDIR)"
         setsid "$SELF_TMP" < /dev/null >> "$LOG" 2>&1 &
-        echo "started; watch /var/log/fsck-volume1.log"
+        sleep 2
+        # Only the tail: the log accumulates across attempts, and grepping
+        # the whole file would match a PREVIOUS run's start line and report
+        # success for a launch that never happened.
+        if ! tail -5 "$LOG" 2>/dev/null | grep -q "manual e2fsck of $VOLUME starting"; then
+            log "WARNING: the detached copy has not reported starting."
+            log "         Check above for an exec error; nothing was changed."
+        fi
+        echo "started; watch $LOG"
         exit 0
         ;;
 esac
@@ -191,7 +229,7 @@ log "--- state after ---"
 tune2fs -l "$DEV" 2>/dev/null | grep -iE "Filesystem state|Last checked" >> "$LOG"
 
 rm -f "$LOCK"
-rm -f "$SELF_TMP"
+rm -f "$0"        # the detached copy
 log "rebooting in 10s to remount cleanly and restart packages"
 log "================================================================"
 sync
