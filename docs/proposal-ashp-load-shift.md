@@ -55,6 +55,9 @@ slot -- so **2.8-6.4p per kWh of heat delivered**. Any estimate that quotes
 the electricity spread against heat is inflated roughly threefold.
 
 Realistic magnitude: near nil in September; **£10-25/month in deep winter**.
+**This figure is superseded -- see "What the first measurement says" below,
+which puts it five times too high.** Left standing rather than edited away,
+because how it was got wrong is the useful part.
 Note what that requires: at 2.8-6.4p per kWh of heat, £10-25/month means
 **5-12 kWh of shifted heat every day** landing inside bonus slots. That is a
 lot of bonus-slot minutes in a cold month, and it is the assumption most
@@ -337,6 +340,64 @@ whether it uses the compressor or the immersion -- and therefore whether lever
 Needs a Daikin developer portal account and one OAuth round trip. No writes,
 no risk to the heating.
 
+## What the first measurement says
+
+Measured 2026-09-11 with `heatreport.py`, which joins the agent's `observe.log`
+to the heat pump history. Everything above this point was arithmetic; this is
+the first number from observation, and it points firmly downwards.
+
+### The timing is ideal
+
+All 14 bonus slots the agent commanded between 1 and 10 September fell between
+**19:56 and 23:28** -- exactly when heating demand peaks. Had they landed at
+3am the feature would be dead on arrival, so this is the good news, and it was
+not knowable in advance.
+
+### The quantity is small, and bounded by the hardware
+
+    305 minutes over 10 days   =   ~30 min/day of commanded cheap time
+
+The binding constraint is not the house, it is the heat pump. An
+**EDLA04E2V3 is a 4 kW unit**, drawing roughly 1.3-1.6 kW electrical:
+
+    30.5 min/day  x  1.5 kW     =   0.76 kWh/day
+                                =   ~23 kWh/month
+    x 8.5-19.5p                 =   £2 - £4.50 per month
+
+That is the **maximum**: every slot used, compressor flat out throughout, and
+none of that energy drawn anyway. The real figure is lower.
+
+### How the estimate came to be five times too high
+
+The £10-25/month above took the house's winter heating consumption
+(~430 kWh/month) and assumed 20-30% could be shifted. It never asked **how
+much energy a 4 kW heat pump can physically absorb in thirty minutes**. It
+cannot absorb 20% of a month's heating in half an hour a day, whatever the
+house needs.
+
+That is twice now that an estimate for this feature has been too generous --
+the first being the claim that the per-kWh case beat the battery arbitrage.
+Both errors ran the same way: reasoning from the size of the opportunity
+rather than the size of the lever.
+
+### Caveats, which could move it back up
+
+- **Ten days, September, one household.** Not a winter sample.
+- **Declined slots are not counted.** `heatreport.py` counts only
+  STARTED..RELEASED pairs, and the agent sits out dispatches when the battery
+  is already at target. Genuinely available bonus time is therefore HIGHER
+  than 305 minutes, possibly much higher, and that is the most likely way
+  this number recovers.
+- Winter EV charging patterns may differ from September's.
+
+### What follows from it
+
+Let the observer run through the first cold weeks -- it costs nothing and
+settles this properly. But **do not build the write path yet.** A weekend of
+code plus a permanent deadman obligation is a fair trade at £15/month and a
+poor one at £3/month, and the evidence currently says the latter. Revisit with
+a winter month of data and a count of declined slots.
+
 ## Open questions
 
 1. Compressor or immersion under `powerfulMode`? Still open, and now less
@@ -351,9 +412,12 @@ no risk to the heating.
 7. How much of the DHW load is genuinely deferrable without running out of
    hot water? Suppressing the tank has a comfort failure mode that shifting
    a heating curve does not.
-3. How much load actually lands inside bonus slots in winter? The £10-25/month
-   estimate is arithmetic, not observation, and it needs 5-12 kWh of shifted
-   heat per day to hold. Bonus slots are driven by the car's schedule, so the
+3. ~~How much load actually lands inside bonus slots in winter?~~ **Partly
+   answered, and badly:** ~30 min/day of commanded slot time in September,
+   against a heat pump that can draw only ~1.5 kW. The estimate needed 5-12
+   kWh of shifted HEAT per day; the hardware ceiling is under 1 kWh of
+   ELECTRICITY per day. What remains open is how much the declined slots add,
+   and whether winter differs. Bonus slots are driven by the car's schedule, so the
    binding constraint may be how many slot-minutes exist at all, not how much
    heat the house can absorb. Measure before believing.
 4. Does bumping the curve mid-slot and dropping it 30 minutes later cause
