@@ -11,6 +11,13 @@
 # Run as the account that owns the project directory, NOT as root: the token
 # is 0600 and the history files must stay writable by the same user that the
 # agent runs as.
+# First thing, before set -e and before anything can fail: prove we were
+# invoked at all, and record WHO by. DSM's Task Scheduler reports only an exit
+# code, so without this there is no way to tell "never exec'd" (126) from
+# "ran and died early", nor which account it actually used.
+echo "$(date): invoked uid=$(id -u) user=$(id -un 2>/dev/null) pwd=$(pwd)" \
+    >> "$(dirname "$0")/daikin-snapshot.log" 2>/dev/null || true
+
 set -e
 
 MIN_GAP=${MIN_GAP:-1700}          # seconds; 1700 = just under 29 minutes
@@ -27,6 +34,27 @@ fi
 
 LOG="$SRC/daikin-snapshot.log"
 HISTORY="$SRC/.daikin-history.jsonl"
+
+# DSM's Task Scheduler would not run this as a normal user at all -- exit 126,
+# nothing executed, not even a shell -- while root-owned tasks on the same NAS
+# fire every five minutes without fail. So it runs as root, and hands the
+# files back afterwards.
+#
+# That matters more than it sounds: daikin.py REWRITES the token on every
+# refresh. Left root-owned at 0600, the next manual run as the owner cannot
+# read its own credentials, and the failure would look like an expired grant
+# rather than a permissions problem. The trap covers every exit path,
+# including the early skip.
+OWNER=$(stat -c %U "$SRC" 2>/dev/null || echo admin)
+hand_back() {
+    [ "$(id -u)" = "0" ] || return 0
+    for f in "$LOG" "$HISTORY" "$SRC/.daikin-consumption.json" \
+             "$SRC/.daikin-token.json"; do
+        [ -e "$f" ] && chown "$OWNER" "$f" 2>/dev/null
+    done
+    return 0
+}
+trap hand_back EXIT
 
 # Nothing configured? Say so once and stay quiet -- this is optional, and a
 # NAS without a heat pump should not accumulate errors forever.
