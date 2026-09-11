@@ -174,13 +174,58 @@ kill_holders() {
     done
 }
 
+# Killing a supervised process achieves nothing: DSM restarts it faster than
+# the next umount attempt. The first real run lost this race six times --
+# postgres and synologand came back with new PIDs each round. Stop the UNIT
+# and systemd leaves it alone.
+#
+# Discovered from /proc/PID/cgroup rather than hardcoded, because the set
+# differs by what is installed. sshd is excluded deliberately: stopping it
+# would cut the only way to watch this, and a human shell holding the volume
+# is dealt with by kill_holders instead.
+stop_holder_units() {
+    units=""
+    for pp in /proc/[0-9]*; do
+        hit=no
+        for l in "$pp/cwd" "$pp/exe"; do
+            t=$(readlink "$l" 2>/dev/null)
+            case "$t" in "$VOLUME"/*) hit=yes;; esac
+        done
+        if [ "$hit" = "no" ]; then
+            for fd in "$pp"/fd/*; do
+                t=$(readlink "$fd" 2>/dev/null) || continue
+                case "$t" in "$VOLUME"/*) hit=yes; break;; esac
+            done
+        fi
+        [ "$hit" = "yes" ] || continue
+        u=$(grep -oE "[a-zA-Z0-9_.@-]+\.service" "$pp/cgroup" 2>/dev/null | head -1)
+        case "$u" in "" | sshd.service) continue ;; esac
+        case " $units " in *" $u "*) ;; *) units="$units $u" ;; esac
+    done
+    for u in $units; do
+        systemctl stop "$u" >/dev/null 2>&1 && log "  systemctl stop $u"
+    done
+    [ -n "$units" ]
+}
+
+log "--- stopping services that hold $VOLUME ---"
+# The usual suspects first, by name, then whatever else is actually holding it.
+for u in pgsql.service synologand.service synoindexd.service; do
+    systemctl stop "$u" >/dev/null 2>&1 && log "  systemctl stop $u"
+done
+systemctl stop "pkg-*.service" >/dev/null 2>&1 && log "  stopped pkg-* units"
+stop_holder_units
+
 log "--- unmounting $VOLUME ---"
 UNMOUNTED=no
 i=1
-while [ $i -le 6 ]; do
+while [ $i -le 8 ]; do
     if umount "$VOLUME" 2>>"$LOG"; then UNMOUNTED=yes; break; fi
-    log "  attempt $i failed; killing holders"
-    if [ $i -le 2 ]; then kill_holders TERM; else kill_holders KILL; fi
+    log "  attempt $i failed"
+    # Units first every time -- something new may have started -- and only
+    # then signal whatever is left that systemd does not own.
+    stop_holder_units
+    if [ $i -le 3 ]; then kill_holders TERM; else kill_holders KILL; fi
     sleep 5
     i=$((i + 1))
 done
