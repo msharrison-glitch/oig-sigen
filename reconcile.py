@@ -263,6 +263,13 @@ HEARTBEAT_TIMEOUT = 5.0
 # short enough that a real failure is caught within a few minutes.
 CLOUD_GRACE = 300.0
 
+# How long after selecting the charging profile before register 30003 is
+# believed about what mode the plant is on. Measured on this plant: 39-43 s
+# from the cloud call to 30003 reading 9, across nine slots; 63 s on a larger
+# one. Below this the register is simply stale, and treating that as "someone
+# took the plant back" would stand down on the very first tick of every slot.
+MODE_CONFIRM_GRACE = 120.0
+
 DEFAULT_CHARGE_KW = 5.0
 SCHEDULE_HORIZON_HOURS = 24
 
@@ -530,6 +537,13 @@ class Reconciler:
         self.cloud = cloud
         self.charge_profile_id = charge_profile_id
         self.cloud_held = False
+        # When we selected the profile, so 30003 is given time to catch up
+        # before it is trusted. See MODE_CONFIRM_GRACE.
+        self._cloud_started_at: datetime | None = None
+        # Slots we have given up on because the plant was taken off our
+        # profile by someone else. Keyed like _confirmed, so it expires
+        # naturally as slots pass.
+        self._stood_down: set[str] = set()
         # With Modbus actuation, the cloud client is used only to put the
         # operational mode back after a release -- the firmware always drops
         # it to Self-Consumption, and there is no Modbus register for it.
@@ -655,7 +669,10 @@ class Reconciler:
         grid = self._telemetry(R.GRID_ACTIVE_POWER)
         ess = self._telemetry(R.ESS_POWER)
         # Read as telemetry, so a firmware that does not serve 30003 logs a
-        # blank rather than crashing the loop.
+        # blank rather than crashing the loop. NOTE: since the stand-down
+        # check this is no longer purely cosmetic -- _lost_the_plant acts on
+        # it. None still means "no evidence" there, so the swallow is still
+        # the right behaviour, but it is no longer a field nothing reads.
         work = self._telemetry(R.EMS_WORK_MODE)
         return PlantState(enable, mode,
                           soc if isinstance(soc, (int, float)) else None,
@@ -664,7 +681,12 @@ class Reconciler:
                           int(work) if isinstance(work, (int, float)) else None)
 
     def _telemetry(self, reg):
-        """Read a register we only log, never decide on.
+        """Read a register whose absence must not crash the loop.
+
+        Was "a register we only log, never decide on" until the stand-down
+        check, which does act on 30003. What still holds is the reason for
+        swallowing the error: None reaches the caller, and every caller
+        treats None as no evidence rather than as a contradiction.
 
         Deliberately swallows a failure. read_plant runs at the top of every
         tick, so letting a cosmetic read raise would mean a firmware that does
@@ -751,6 +773,7 @@ class Reconciler:
         self._cloud_record(slot, restore_mode, restore_profile)
         self.cloud.set_mode_verified(9, self.charge_profile_id)
         self.cloud_held = True
+        self._cloud_started_at = utcnow()
         log.info("cloud: selected charging profile %s (was mode %s)",
                  self.charge_profile_id, restore_mode)
         return "STARTED charging"
@@ -801,8 +824,85 @@ class Reconciler:
         self.cloud_held = False
         return "RELEASED"
 
+    def _lost_the_plant(self, state: PlantState) -> bool:
+        """Has someone taken the plant off our charging profile?
+
+        Observed on a second plant 2026-09-07: the owner, who had not been
+        told the agent was live, set the mode back to Sigen AI from the app.
+        The agent went on reporting `holding` for nine minutes while 30003
+        sat at 1, because nothing ever re-checked that the command was still
+        in force. This is that check.
+
+        It is deliberately hard to trigger, because a FALSE positive is worse
+        than a missed one: standing down discards the restore record, so
+        getting it wrong would orphan a plant that is still charging with
+        nothing left that knows how to stop it. Three gates:
+
+          - 30003 must be readable. Not knowing is not evidence.
+          - MODE_CONFIRM_GRACE must have passed. The register lags the cloud
+            call by 39-63 s, so before that it is stale, not contradictory.
+          - the CLOUD must agree. It is the actuator's own view, and one
+            witness is not enough to justify throwing away the only record of
+            how to undo a charge.
+        """
+        if state.work_mode is None or state.work_mode == R.EMS_WORK_MODE_CUSTOM:
+            return False
+        if self._cloud_started_at is None:
+            return False
+        if (utcnow() - self._cloud_started_at).total_seconds() < \
+                MODE_CONFIRM_GRACE:
+            return False
+
+        try:
+            current = self.cloud.current_mode()
+        except Exception as exc:                  # noqa: BLE001
+            # Unreachable cloud is not agreement. Keep holding: the slot may
+            # be wasted, but the restore record survives and the deadman can
+            # still put the plant back.
+            log.warning("30003 reads %s, not our profile, but the cloud is "
+                        "unreachable (%s) -- holding rather than discarding "
+                        "the restore record on one witness",
+                        _work_mode(state.work_mode), exc)
+            return False
+
+        if current.get("currentProfileId") == self.charge_profile_id:
+            log.warning("30003 reads %s but the cloud still reports profile "
+                        "%s -- trusting the cloud and holding",
+                        _work_mode(state.work_mode), self.charge_profile_id)
+            return False
+        return True
+
+    def _stand_down(self, slot: Slot, state: PlantState) -> str:
+        """Give up this slot, and leave the owner's chosen mode alone.
+
+        NOT a re-assert. If the owner has taken their plant back, putting it
+        straight back onto a grid-charging profile is the last thing this
+        project should do -- it exists to enhance Sigen AI, not to wrestle
+        the owner for control.
+
+        And the restore record is DISCARDED rather than applied. Whatever
+        mode is set now is theirs, so restoring "what was there before"
+        would silently undo a deliberate choice -- which is a quieter and
+        more annoying failure than not charging.
+        """
+        import sigencloud
+        self._stood_down.add(slot.start.isoformat())
+        self.cloud_held = False
+        self._cloud_started_at = None
+        log.error("PLANT TAKEN BACK: 30003 reads %s and the cloud agrees we "
+                  "are no longer on profile %s. Standing down for this slot "
+                  "and NOT re-asserting. Discarding the restore record: the "
+                  "mode now set is the owner's, and restoring over it would "
+                  "undo their choice.",
+                  _work_mode(state.work_mode), self.charge_profile_id)
+        if not self.dry_run:
+            sigencloud.clear_cloud_state()
+        return "STOOD DOWN (plant taken back)"
+
     def ensure_charging(self, slot: Slot, state: PlantState) -> str:
         if self.cloud is not None:
+            if self.cloud_held and self._lost_the_plant(state):
+                return self._stand_down(slot, state)
             return self._cloud_start(slot)
         if state.is_charging_at(self.charge_kw) and self.lease.held:
             self.lease.renew(LEASE_TTL_MINUTES)
@@ -966,6 +1066,15 @@ class Reconciler:
                     # Keep watching: a car that starts five minutes in still
                     # leaves most of the slot worth having.
                     self._awaiting_confirmation = True
+
+        if target is not None and target.start.isoformat() in self._stood_down:
+            # Already lost this one to the owner. Re-acquiring would be
+            # exactly the fight _stand_down refuses to have.
+            log.info("slot %s: stood down earlier because the plant was taken "
+                     "back -- not re-acquiring",
+                     target.local()[0].strftime("%H:%M"))
+            target = None
+            reason = " (stood down)"
 
         self._holding_dispatch = bool(
             target is not None and "dispatch" in target.source)

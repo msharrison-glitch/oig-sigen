@@ -574,6 +574,89 @@ def main() -> int:
     check("restored to what was there before", fc.sets, [(1, -1)])
     check("state cleared", sigencloud.read_cloud_state(), None)
 
+    print("\nThe plant being taken back mid-slot: stand down, do not fight")
+    # Observed on a second plant 2026-09-07: the owner, not knowing the agent
+    # was live, set the mode back to Sigen AI from the app. The agent went on
+    # reporting `holding` for nine minutes because nothing re-checked that
+    # its command was still in force. These pin the fix -- and, more
+    # importantly, pin the three cases where it must NOT fire, because a
+    # false stand-down discards the restore record and would orphan a plant
+    # that is still charging.
+
+    def held_reconciler(work_mode=None, mode=1, profile=-1):
+        """A reconciler mid-slot, with 30003 answerable."""
+        sigencloud.clear_cloud_state()
+        plant = make_plant(soc_pct=40.0)
+        if work_mode is not None:
+            plant.input[30003] = work_mode
+        cloud = FakeCloud(mode=mode)
+        cloud.profile = profile
+        rec = reconcile.Reconciler(client_for(plant), FakeOctopus([live_c]),
+                                   5.0, 95.0, bonus_only=True, cloud=cloud,
+                                   charge_profile_id=9664)
+        rec.tick(now)                      # takes the slot
+        return rec, cloud, plant
+
+    # 1. Inside the grace window, a contradictory 30003 is STALE, not news.
+    #    Measured: the register lags the cloud call by 39-43s here, 63s on a
+    #    larger plant. Acting immediately would stand down on every slot's
+    #    first tick.
+    rec_s, cs, plant_s = held_reconciler(work_mode=R.EMS_WORK_MODE_AI)
+    check("within the grace window it keeps holding", rec_s.tick(now),
+          "holding")
+    check("and the restore record survives",
+          sigencloud.read_cloud_state() is not None, True)
+
+    # 2. Past the grace window, with the cloud agreeing, it stands down.
+    rec_s._cloud_started_at = (reconcile.utcnow()
+                               - timedelta(seconds=reconcile.MODE_CONFIRM_GRACE + 60))
+    cs.mode, cs.profile = R.EMS_WORK_MODE_AI, -1     # cloud agrees: not ours
+    cs.sets.clear()
+    check("past the grace window it stands down",
+          rec_s.tick(now), "STOOD DOWN (plant taken back)")
+    check("it does NOT re-assert the profile", cs.sets, [])
+    check("it no longer believes it holds the plant", rec_s.cloud_held, False)
+    # The owner's mode is now set. Restoring "what was there before" would
+    # silently undo their choice, so the record is discarded, not applied.
+    check("and the restore record is DISCARDED, not applied",
+          sigencloud.read_cloud_state(), None)
+
+    # 3. It must not grab the same slot back on the next tick.
+    cs.sets.clear()
+    check("the same slot is not re-acquired", rec_s.tick(now), "idle")
+    check("still nothing written to the cloud", cs.sets, [])
+
+    # 4. The cloud disagreeing means one witness only -- keep holding.
+    rec_d, cd, _ = held_reconciler(work_mode=R.EMS_WORK_MODE_AI,
+                                   mode=9, profile=9664)
+    rec_d._cloud_started_at = (reconcile.utcnow()
+                               - timedelta(seconds=reconcile.MODE_CONFIRM_GRACE + 60))
+    check("30003 says lost but the cloud still says ours -> hold",
+          rec_d.tick(now), "holding")
+    check("record kept", sigencloud.read_cloud_state() is not None, True)
+
+    # 5. An unreadable 30003 is not evidence of anything.
+    rec_n, cn, _ = held_reconciler(work_mode=None)   # 30003 absent entirely
+    rec_n._cloud_started_at = (reconcile.utcnow()
+                               - timedelta(seconds=reconcile.MODE_CONFIRM_GRACE + 60))
+    check("no 30003 -> holding, not standing down", rec_n.tick(now),
+          "holding")
+
+    # 6. An unreachable cloud must not cost us the restore record. Losing it
+    #    while the plant is still charging is the one outcome worse than
+    #    wasting a slot.
+    rec_u, cu, _ = held_reconciler(work_mode=R.EMS_WORK_MODE_AI)
+    rec_u._cloud_started_at = (reconcile.utcnow()
+                               - timedelta(seconds=reconcile.MODE_CONFIRM_GRACE + 60))
+
+    def _boom():
+        raise RuntimeError("cloud down")
+    cu.current_mode = _boom                         # type: ignore[method-assign]
+    check("cloud unreachable -> holding", rec_u.tick(now), "holding")
+    check("and the restore record is kept",
+          sigencloud.read_cloud_state() is not None, True)
+    sigencloud.clear_cloud_state()
+
     print("\nA crash-restart must not record the charge profile as its own restore")
     # 2026-09-03: an expired cloud token killed the agent AFTER it had
     # switched the plant. The restart read "currently on profile 9664" as the
