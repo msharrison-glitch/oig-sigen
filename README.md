@@ -7,8 +7,9 @@ schedules your car, billed at the off-peak rate for the whole property.
 Your SigenStor has no idea those slots exist. This tells it.
 
 No Home Assistant. No dependencies. About 3,800 lines of standard-library
-Python, plus 1,700 lines of offline tests, running on anything — a NAS, a Pi,
-a mini-PC, a spare laptop.
+Python, plus 1,700 lines of offline tests, running on anything that stays
+awake — a NAS, a Pi, a mini-PC, a desktop, or a laptop configured not to
+sleep.
 
 ---
 
@@ -20,7 +21,8 @@ You need all four:
 - **Octopus Intelligent Go** as your import tariff
 - An **EV that actually gets charged** — no charging, no bonus slots, nothing
   for this to do
-- Somewhere to run a small Python process
+- Somewhere to run a small Python process **that will not go to sleep** — see
+  [What to run it on](#what-to-run-it-on)
 
 **It does not replace your inverter's optimiser.** If you run Sigen AI or
 Time-based Control and you're happy with it, keep it. This only touches the
@@ -71,6 +73,58 @@ test it.
 
 **Choose your actuation path deliberately.** See below; one of them changes
 your inverter's operating mode as a side effect.
+
+---
+
+## What to run it on
+
+**The one hard requirement is that it does not sleep.** A suspended host is
+indistinguishable from a dead one: the plant has no Modbus watchdog, so a
+latched mode stays latched, and on the cloud path the plant simply carries on
+grid-charging with your normal mode suspended. The agent measures its sleep
+against the wall clock and logs when it has been suspended, so you will see it
+after the fact — but seeing it afterwards is not the same as it not happening.
+
+**A laptop is fine, but only once you have configured it.** Out of the box a
+closed lid suspends it, which is how this was learned. To use one:
+
+| | |
+|---|---|
+| macOS | `sudo pmset -a disablesleep 1` (lid-closed operation), plus `powernap 0`. **Keep it on AC** — `caffeinate -s` silently stops holding on battery |
+| Linux | `HandleLidSwitch=ignore` in `/etc/systemd/logind.conf`, then restart `systemd-logind` |
+| Windows | Power Options → *Choose what closing the lid does* → **Do nothing**, on "Plugged in" |
+
+Battery wear is the trade: a laptop held permanently on AC ages its cell
+faster than one that cycles. If the machine is otherwise idle anyway, that is
+usually an acceptable price.
+
+### Running cost
+
+It runs continuously, so its idle draw is what you pay for, not its peak.
+Figures below are a headless machine doing nothing but this, costed at a
+blended **23p/kWh** — roughly what a 24/7 load works out at on IOG, with a
+quarter of each day inside the guaranteed cheap window.
+
+| Host | Typical idle | kWh/year | Approx £/year |
+|---|---|---|---|
+| Something already running (NAS, desktop, server) | **no extra** | 0 | **£0** |
+| Raspberry Pi Zero 2 W | 0.5 W | 4 | £1 |
+| Raspberry Pi 4 | 3 W | 26 | £6 |
+| Raspberry Pi 5 | 3.5 W | 31 | £7 |
+| Mac mini / laptop, Apple silicon | 5 W | 44 | £10 |
+| Mini-PC (Intel N100 class) | 7 W | 61 | £14 |
+| Older Intel mini-PC or laptop | 10–15 W | 88–131 | £21–31 |
+| NAS bought specifically for this | 30 W+ | 263+ | £62+ |
+
+Two things follow. **The cheapest host is one you are already running** — the
+marginal cost of adding a Python process that sleeps most of the time is
+indistinguishable from zero, which is why a NAS or an always-on desktop beats
+buying anything. And if you are buying, **the running cost can overtake the
+purchase price**: a £62 Pi 5 costs about £35 of electricity over five years,
+while a 12 W mini-PC costs about £120 over the same period.
+
+These are estimates, not measurements. Real draw depends on what else the
+machine is doing, and on your own tariff split.
 
 ---
 
@@ -181,12 +235,44 @@ python3 reconcile.py --bonus-only --require-ev \
 ```
 
 For the cloud path, first create a profile in the mySigen app
-(**Operational Mode → Add**) that charges **from the grid** at a sensible
-rate, covering as wide a time range as the app allows. The agent uses it as
-an on/off switch — the scheduling lives here, not in the profile.
+(**Operational Mode → Add**) that charges **from the grid**, covering as wide
+a time range as the app allows. The agent uses it as an on/off switch — the
+scheduling lives here, not in the profile.
 
-Testing on a Mac laptop? `caffeinate -s` only holds on AC power and fails
-silently, so on battery it will sleep through slots — see `deploy/README.md`.
+**Choosing the rate takes a moment's thought, because the profile is a fixed
+setting and the agent cannot override it.** Changing your mind later means
+editing the profile in the app.
+
+The constraint people miss: **a bonus slot exists because Octopus is charging
+your car, so the battery and the car draw at the same time, by definition.**
+Work out what is left:
+
+```
+headroom = supply capacity − EV charger − household baseline
+rate     = the LOWER of that and your inverter's rated charge power
+```
+
+On a typical UK single-phase supply, 100 A is about 23 kW. Take off a 7.4 kW
+charger and a kilowatt or so of background load and you have roughly 14 kW
+left — so for most single-phase plants the **inverter's own charge rating is
+the binding limit**, not the fuse. That changes if you have an 80 A or 60 A
+supply, a 22 kW charger, or both, in which case the fuse binds first and you
+should size to it. Three-phase installations have far more room and are
+usually inverter-limited.
+
+Check your inverter's rating rather than assuming: `python3 probe.py` reports
+it. Note that on a plant with more battery modules than inverter capacity, it
+is the **inverter** that decides, not the battery.
+
+If you are unsure, start low and raise it once you have watched a slot. Too
+low only costs you some of the benefit — a half-hour slot at 3 kW puts in
+1.5 kWh where 10 kW would have put in 5. Too high risks tripping something
+while you are asleep.
+
+Running it on a laptop? Configure it not to sleep first — see
+[What to run it on](#what-to-run-it-on). On macOS in particular,
+`caffeinate -s` only holds on AC power and fails silently, so on battery it
+will sleep through slots. `deploy/README.md` has the detail.
 
 `deploy/` has a systemd unit, a cron deadman and a runbook. `Dockerfile` and
 `docker-compose.yml` build a multi-arch image for a NAS or Pi — see
