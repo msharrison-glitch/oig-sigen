@@ -59,6 +59,7 @@ Then:
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import os
 import secrets
@@ -90,6 +91,8 @@ HISTORY_FILE = ".daikin-history.jsonl"
 # so inlining them multiplied the history file by roughly four for no
 # information at all.
 CONSUMPTION_FILE = ".daikin-consumption.json"
+# Daily figures, from the "w" buckets the payload already carries.
+DAILY_FILE = ".daikin-daily.json"
 
 # Refresh this long before expiry rather than waiting to be refused. The
 # agent's ticks are minutes apart, so a token that expires between deciding
@@ -398,6 +401,86 @@ def consumption(point: dict, this_year: int = None) -> dict:
     return {"unit": unit, "monthly": out}
 
 
+def consumption_daily(point: dict, today: "datetime.date" = None) -> dict:
+    """Daily electrical consumption, labelled with real dates.
+
+    The same payload that carries the 24 monthly buckets also carries 14
+    DAILY ones under "w", which this project ignored until 2026-09-13 and
+    therefore discarded on every poll since. They are a rolling two-week
+    window, so a day that falls out is gone for good -- exactly the argument
+    that justified archiving the monthly figures.
+
+    MAPPING, verified rather than assumed, because getting the monthly
+    equivalent wrong once made heating appear to peak in September:
+
+        index 0-6   last week, Monday..Sunday
+        index 7-13  this week, Monday..Sunday
+
+    so index 7 + (isoweekday - 1) is today. Cross-checked 2026-09-13, a
+    Sunday: w[13] read 2 kWh for hot water, and the "d" buckets for today
+    summed to exactly 2.
+    """
+    node = (point.get("consumptionData") or {}).get("value") or {}
+    electrical = node.get("electrical") or {}
+    unit = electrical.get("unit") if isinstance(
+        electrical.get("unit"), str) else None
+
+    buckets = None
+    for _mode, series in electrical.items():
+        if isinstance(series, dict) and isinstance(series.get("w"), list):
+            buckets = series["w"]
+            break
+    if not buckets or len(buckets) < 14:
+        return {}
+
+    today = today or datetime.date.today()
+    today_index = 7 + (today.isoweekday() - 1)
+
+    out = []
+    for index, value in enumerate(buckets[:14]):
+        if value is None:
+            continue                     # a day that has not happened yet
+        day = today + datetime.timedelta(days=index - today_index)
+        out.append((day.isoformat(), value))
+    return {"unit": unit or "kWh", "daily": out}
+
+
+def merge_daily(payload: list, today=None) -> tuple:
+    """Fold this poll's daily figures into a permanent per-day record.
+
+    Same shape and same reasoning as merge_consumption, one level finer.
+    Keyed by "YYYY-MM-DD" and merged, so polling often costs nothing.
+    """
+    path = state_path(DAILY_FILE)
+    try:
+        with open(path, encoding="utf-8") as handle:
+            store = json.load(handle)
+    except (FileNotFoundError, ValueError):
+        store = {}
+
+    added = 0
+    for _device, point in management_points(payload):
+        kind = point.get("managementPointType")
+        if kind not in ("climateControl", "domesticHotWaterTank"):
+            continue
+        used = consumption_daily(point, today)
+        if not used:
+            continue
+        unit = used.get("unit") or "kWh"
+        for day, value in used.get("daily", []):
+            entry = store.setdefault(day, {})
+            if entry.get(kind) != value:
+                added += 1
+            entry[kind] = value
+            entry["unit"] = unit
+
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(store, handle, indent=1, sort_keys=True)
+    # Path, not the dict -- matching merge_consumption, whose caller prints
+    # this straight into the log.
+    return str(path), len(store), added
+
+
 def snapshot(payload: list) -> dict:
     """One flat, append-able record of everything worth keeping.
 
@@ -560,6 +643,7 @@ def main() -> int:
             record = snapshot(payload)
             where = append_history(record)
             store, months, changed = merge_consumption(payload)
+            daily_store, days, daily_changed = merge_daily(payload)
             climate = record.get("points", {}).get("climateControl", {})
             print(f"appended to {where}")
             print(f"  {record['fetched_at']}  "
@@ -567,6 +651,8 @@ def main() -> int:
                   f"sensors={climate.get('sensors')}")
             print(f"consumption: {months} months on record in {store}"
                   f"  ({changed} value(s) updated this poll)")
+            print(f"daily:       {days} days on record in {daily_store}"
+                  f"  ({daily_changed} value(s) updated this poll)")
         else:
             describe(payload)
         if remaining is not None:

@@ -303,6 +303,51 @@ def main() -> int:
     raises("missing refresh_token is rejected",
            daikin._store_grant, {"access_token": "AT"})
 
+    print("\nDaily buckets: the mapping, which is the whole risk")
+    # The "w" array is a rolling two-week window, Monday-first, last week then
+    # this week. Getting the monthly equivalent wrong once made heating appear
+    # to peak in September, so this is pinned against a known Sunday: the real
+    # payload of 2026-09-13 had hot water w[13] = 2, and that day's "d" slots
+    # summed to exactly 2.
+    import datetime as _dt
+    wk = {"consumptionData": {"value": {"electrical": {
+        "unit": "kWh",
+        "heating": {"w": [2, 3, 1, 1, 3, 2, 3, 2, 2, 2, 2, 2, 2, 9]},
+    }}}}
+    sunday = _dt.date(2026, 9, 13)          # isoweekday 7
+    got = daikin.consumption_daily(wk, sunday)
+    days = dict(got["daily"])
+    check("today is the last bucket on a Sunday",
+          days["2026-09-13"], 9)
+    check("this week starts the Monday before",
+          days["2026-09-07"], 2)
+    check("last week runs back another seven days",
+          days["2026-08-31"], 2)
+    check("the oldest bucket is thirteen days ago",
+          min(days), "2026-08-31")
+    check("fourteen days in all", len(days), 14)
+
+    # A Wednesday must land today at index 7 + 2, not at the end.
+    wednesday = _dt.date(2026, 9, 9)
+    mid = dict(daikin.consumption_daily(wk, wednesday)["daily"])
+    check("midweek puts today at index 9, not 13",
+          mid["2026-09-09"], 2)
+    check("and the future days of this week are still included",
+          mid["2026-09-13"], 9)
+
+    # Null buckets are days that have not happened; they must not become 0.
+    sparse = {"consumptionData": {"value": {"electrical": {
+        "unit": "kWh",
+        "heating": {"w": [1, 1, 1, 1, 1, 1, 1, 1, None, None, None, None, None, None]},
+    }}}}
+    thin = dict(daikin.consumption_daily(sparse, _dt.date(2026, 9, 8))["daily"])
+    check("a null day is dropped, not recorded as zero",
+          "2026-09-09" in thin, False)
+    check("and the days that did happen survive", len(thin), 8)
+
+    check("a payload with no w buckets returns empty, not a crash",
+          daikin.consumption_daily({}, sunday), {})
+
     print("\nThis module has NO write path, and must not grow one by accident")
     source = io.open(daikin.__file__, encoding="utf-8").read()
     code = "\n".join(line for line in source.splitlines()
