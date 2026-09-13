@@ -1173,7 +1173,17 @@ class Reconciler:
             return False
         lease = control.read_state()
         payload = {
+            # BOTH actuators must be reported, and for a long time only one
+            # was. The cloud path never touches self.lease -- it selects a
+            # charge profile instead -- so `lease_held` was False through
+            # every --via-cloud slot, and the watchdog's whole severity
+            # judgement keys off it. An agent that died mid-charge on the
+            # path that actually runs every night was therefore reported as
+            # WARN ("nothing held -- plant is not at risk") when the plant
+            # was in fact importing from the grid with nobody watching: the
+            # one alarm that matters, wrong precisely when it mattered.
             "lease_held": bool(self.lease.held),
+            "cloud_held": bool(self.cloud_held),
             "lease_expires": (lease or {}).get("expires_at"),
             "soc": state.soc,
             "mode": state.mode,

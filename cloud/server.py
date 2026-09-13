@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS heartbeat (
     site_id       INTEGER PRIMARY KEY REFERENCES site(id),
     seen_at       TEXT NOT NULL,
     lease_held    INTEGER NOT NULL,
+    cloud_held    INTEGER NOT NULL DEFAULT 0,
     lease_expires TEXT,
     soc           REAL,
     reverted_at   TEXT,
@@ -82,10 +83,26 @@ def hash_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+def migrate(db: sqlite3.Connection) -> None:
+    """Add columns a deployed watchdog's database will not have.
+
+    `CREATE TABLE IF NOT EXISTS` is a no-op against an existing table, so a
+    watchdog that has been running since before `cloud_held` existed would
+    keep a schema without it and fall over on the first heartbeat. Idempotent:
+    it reads what is there rather than tracking a version number.
+    """
+    have = {row["name"] for row in db.execute("PRAGMA table_info(heartbeat)")}
+    if "cloud_held" not in have:
+        db.execute("ALTER TABLE heartbeat "
+                   "ADD COLUMN cloud_held INTEGER NOT NULL DEFAULT 0")
+        db.commit()
+
+
 def connect(path: Path = DB_PATH) -> sqlite3.Connection:
     db = sqlite3.connect(path)
     db.row_factory = sqlite3.Row
     db.executescript(SCHEMA)
+    migrate(db)
     return db
 
 
@@ -117,17 +134,19 @@ def site_for_token(db: sqlite3.Connection, token: str) -> sqlite3.Row | None:
 def record(db: sqlite3.Connection, site_id: int, payload: dict) -> None:
     db.execute(
         """INSERT INTO heartbeat
-             (site_id, seen_at, lease_held, lease_expires, soc, mode,
-              enable, action, agent_version, reverted_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             (site_id, seen_at, lease_held, cloud_held, lease_expires, soc,
+              mode, enable, action, agent_version, reverted_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(site_id) DO UPDATE SET
              seen_at=excluded.seen_at, lease_held=excluded.lease_held,
+             cloud_held=excluded.cloud_held,
              lease_expires=excluded.lease_expires, soc=excluded.soc,
              mode=excluded.mode, enable=excluded.enable,
              action=excluded.action, agent_version=excluded.agent_version,
              reverted_at=excluded.reverted_at""",
         (site_id, utcnow().isoformat(),
          1 if payload.get("lease_held") else 0,
+         1 if payload.get("cloud_held") else 0,
          payload.get("lease_expires"),
          payload.get("soc"), payload.get("mode"), payload.get("enable"),
          payload.get("action"), payload.get("agent_version"),
@@ -139,10 +158,15 @@ def record(db: sqlite3.Connection, site_id: int, payload: dict) -> None:
 def evaluate(db: sqlite3.Connection, now: datetime | None = None) -> list[dict]:
     """One row per site, with a severity.
 
-    The distinction that matters is not 'is the agent up' but 'was it holding
-    a lease when it went quiet'. A silent agent with nothing held is an
-    availability problem; a silent agent mid-lease is a plant that may be
-    importing at peak with nobody watching.
+    The distinction that matters is not 'is the agent up' but 'was it
+    COMMANDING THE PLANT when it went quiet'. A silent agent with nothing held
+    is an availability problem; a silent agent mid-command is a plant that may
+    be importing at peak with nobody watching.
+
+    'Commanding' means either actuator: a Modbus lease OR a cloud charge
+    profile. Reading only the lease made the cloud path -- the one actually
+    deployed -- register as 'nothing held', so its worst failure was graded
+    WARN instead of CRITICAL.
     """
     now = now or utcnow()
     out = []
@@ -158,10 +182,18 @@ def evaluate(db: sqlite3.Connection, now: datetime | None = None) -> list[dict]:
             continue
         seen = datetime.fromisoformat(row["seen_at"])
         quiet = now - seen
-        held = bool(row["lease_held"])
+        # EITHER actuator counts. A Modbus lease latches mode 3 at the plant;
+        # a cloud hold latches nothing, but it leaves the plant on a profile
+        # that grid-charges and suspends Sigen AI, which costs money for
+        # exactly as long as nobody notices. Keying only off the lease meant
+        # the deployed --via-cloud path was invisible here.
+        lease_held = bool(row["lease_held"])
+        cloud_held = bool(row["cloud_held"])
+        held = lease_held or cloud_held
+        holding = "a lease" if lease_held else "a cloud charge profile"
         if quiet <= STALE_AFTER:
             detail = (f"last seen {quiet.total_seconds():.0f}s ago"
-                      + (", holding a lease" if held else ""))
+                      + (f", holding {holding}" if held else ""))
             severity = "OK"
             if row["reverted_at"]:
                 # Not an outage, but the owner has to act, so it must not be
@@ -172,26 +204,36 @@ def evaluate(db: sqlite3.Connection, now: datetime | None = None) -> list[dict]:
                            "Sigen AI")
             out.append({"site": row["name"], "severity": severity,
                         "detail": detail, "soc": row["soc"],
-                        "lease_held": held})
+                        "lease_held": lease_held, "cloud_held": cloud_held})
             continue
         if held:
             detail = (f"SILENT for {quiet.total_seconds() / 60:.0f} min WHILE "
-                      f"HOLDING A LEASE")
+                      f"HOLDING {holding.upper()}")
             expires = row["lease_expires"]
-            if expires and datetime.fromisoformat(expires) < now:
+            if not lease_held:
+                # There is no TTL on a cloud hold, so no lease can expire and
+                # no lease deadman will fire. The thing that undoes it is
+                # `sigencloud.py --deadman`, which lives on the same host that
+                # has just gone quiet -- so assume nothing has run.
+                detail += ("; nothing is latched at the plant, but it stays "
+                           "on the charge profile with Sigen AI suspended "
+                           "until sigencloud --deadman restores the mode "
+                           "-- unconfirmed")
+            elif expires and datetime.fromisoformat(expires) < now:
                 detail += ("; its lease has expired, so the site deadman "
                            "should have released -- unconfirmed")
             else:
                 detail += "; the site deadman has not yet had cause to fire"
             out.append({"site": row["name"], "severity": "CRITICAL",
                         "detail": detail, "soc": row["soc"],
-                        "lease_held": True})
+                        "lease_held": lease_held, "cloud_held": cloud_held})
         else:
             out.append({"site": row["name"], "severity": "WARN",
                         "detail": f"silent for "
                                   f"{quiet.total_seconds() / 60:.0f} min, "
                                   f"nothing held -- plant is not at risk",
-                        "soc": row["soc"], "lease_held": False})
+                        "soc": row["soc"], "lease_held": False,
+                        "cloud_held": False})
     return out
 
 

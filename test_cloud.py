@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sqlite3
 import sys
 import threading
 import urllib.error
@@ -117,11 +118,11 @@ def main() -> int:
     db = server.connect(db_path)
     now = datetime.now(timezone.utc)
 
-    def set_seen(minutes_ago: float, held: bool, expires=None):
+    def set_seen(minutes_ago: float, held: bool, expires=None, cloud=False):
         db.execute("UPDATE heartbeat SET seen_at=?, lease_held=?, "
-                   "lease_expires=? WHERE site_id=1",
+                   "cloud_held=?, lease_expires=? WHERE site_id=1",
                    ((now - timedelta(minutes=minutes_ago)).isoformat(),
-                    1 if held else 0, expires))
+                    1 if held else 0, 1 if cloud else 0, expires))
         db.commit()
 
     set_seen(1, False)
@@ -141,11 +142,77 @@ def main() -> int:
     check("silent, holding, lease already expired -> flags it unconfirmed",
           "unconfirmed" in server.evaluate(db, now)[0]["detail"], True)
 
+    # The cloud path takes no lease -- it selects a charge profile -- so
+    # lease_held is False for the whole of every --via-cloud slot. Grading
+    # that WARN told the owner "plant is not at risk" about a plant that was
+    # grid-charging with Sigen AI suspended. This is the deployed path, so
+    # this was the failure the watchdog was least able to report.
+    set_seen(1, False, cloud=True)
+    row = server.evaluate(db, now)[0]
+    check("fresh and holding a cloud profile -> OK", row["severity"], "OK")
+    check("and names the actuator it is holding",
+          "holding a cloud charge profile" in row["detail"], True)
+
+    set_seen(60, False, cloud=True)
+    row = server.evaluate(db, now)[0]
+    check("SILENT while holding a cloud profile -> CRITICAL, not WARN",
+          row["severity"], "CRITICAL")
+    check("and never says the plant is not at risk",
+          "not at risk" in row["detail"], False)
+    check("and points at the restore that actually applies",
+          "sigencloud --deadman" in row["detail"], True)
+    check("and does not invent a lease expiry it cannot have",
+          "lease has expired" in row["detail"], False)
+    check("both actuators are reported separately",
+          (row["lease_held"], row["cloud_held"]), (False, True))
+
+    set_seen(60, False, cloud=False)
+    check("neither held, still silent -> back to WARN",
+          server.evaluate(db, now)[0]["severity"], "WARN")
+
     server.add_site(db, "never-seen")
     check("a site that never reported -> UNKNOWN",
           [r["severity"] for r in server.evaluate(db, now)
            if r["site"] == "never-seen"][0], "UNKNOWN")
     db.close()
+
+    print("\nA database predating cloud_held is migrated, not broken")
+    # CREATE TABLE IF NOT EXISTS does nothing to an existing table, so a
+    # watchdog that has been running since before this column would keep the
+    # old schema and fail on the first heartbeat after an upgrade. That is a
+    # monitoring outage caused by improving the monitoring.
+    old_path = _TMP / "watchdog-legacy.db"
+    if old_path.exists():
+        old_path.unlink()
+    legacy = sqlite3.connect(old_path)
+    legacy.executescript("""
+        CREATE TABLE site (
+            id INTEGER PRIMARY KEY, name TEXT UNIQUE NOT NULL,
+            token_hash TEXT UNIQUE NOT NULL, created_at TEXT NOT NULL);
+        CREATE TABLE heartbeat (
+            site_id INTEGER PRIMARY KEY REFERENCES site(id),
+            seen_at TEXT NOT NULL, lease_held INTEGER NOT NULL,
+            lease_expires TEXT, soc REAL, reverted_at TEXT, mode INTEGER,
+            enable INTEGER, action TEXT, agent_version TEXT);
+    """)
+    legacy.commit()
+    legacy.close()
+
+    db = server.connect(old_path)
+    columns = {r["name"] for r in db.execute("PRAGMA table_info(heartbeat)")}
+    check("cloud_held is added to the old table", "cloud_held" in columns, True)
+    server.add_site(db, "legacy")
+    server.record(db, 1, {"lease_held": False, "cloud_held": True, "soc": 50.0})
+    check("and a cloud-held heartbeat records against it",
+          db.execute("SELECT cloud_held FROM heartbeat").fetchone()[0], 1)
+    check("rows that predate the column default to not-held, not NULL",
+          server.evaluate(db, now)[0]["cloud_held"] in (True, False), True)
+    server.migrate(db)
+    check("migrating an already-migrated database is a no-op",
+          len({r["name"] for r in db.execute("PRAGMA table_info(heartbeat)")}),
+          len(columns))
+    db.close()
+    old_path.unlink()
 
     print("\nA mode revert must not hide under a green OK")
     db = server.connect(db_path)
@@ -176,6 +243,27 @@ def main() -> int:
     check("and the action it took", row["action"], "idle")
     check("and the agent version", row["agent_version"],
           reconcile.AGENT_VERSION)
+
+    # The bug was in the AGENT's payload, not only the server's reading of it,
+    # so pin the wire format: a reconciler holding the plant via the cloud
+    # must SAY so. Asserting on the server's stored row would pass even if
+    # send_heartbeat dropped the field and the column merely defaulted to 0.
+    rec.cloud_held = True
+    sent: dict = {}
+    real_urlopen = urllib.request.urlopen
+
+    def capture(request, *args, **kwargs):
+        sent.update(json.loads(request.data.decode()))
+        return real_urlopen(request, *args, **kwargs)
+
+    urllib.request.urlopen = capture
+    try:
+        rec.tick()
+    finally:
+        urllib.request.urlopen = real_urlopen
+    check("a cloud hold is reported on the wire", sent.get("cloud_held"), True)
+    check("and the lease is reported separately, not conflated",
+          sent.get("lease_held"), False)
 
     print("\nThe watchdog must never be able to harm the controller")
     rec_bad = reconcile.Reconciler(
