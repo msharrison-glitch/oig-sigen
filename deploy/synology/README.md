@@ -8,6 +8,12 @@ A NAS earns its place for one reason — it does not sleep. A laptop lid closing
 suspends the agent mid-slot, and on the Modbus path that leaves the plant
 latched with nothing running to release it.
 
+> **Not here for the agent?** This directory also carries three scripts for
+> repairing a DSM volume that Storage Manager's own File System Check cannot
+> fix, and for undoing the package damage that doing so can cause. They are
+> unrelated to charging a battery — see
+> [Not the agent: repairing the NAS itself](#not-the-agent-repairing-the-nas-itself).
+
 ## What you need
 
 No model is recommended over another; only one has been tested. Check a
@@ -290,3 +296,89 @@ mode revert documented in the main README.
 Reading the log, what `.lease.json` and `.cloud-mode.json` mean, and why you
 must never `kill -9` are host-independent — see "Operating the agent" in
 [`../README.md`](../README.md).
+
+---
+
+## Not the agent: repairing the NAS itself
+
+Three scripts here have nothing to do with charging a battery. They are kept
+because **DSM cannot do this job itself**, and because a NAS that will not
+mount its volume is not going to run the agent either.
+
+### Why DSM's own File System Check cannot fix a corrupt volume
+
+DSM runs `e2fsck` in **preen** mode (`-p`), which by design refuses anything
+needing a decision. A corrupted orphan inode list is exactly that. So a volume
+reporting
+
+```
+UNEXPECTED INCONSISTENCY; RUN fsck MANUALLY (i.e., without -a or -p options)
+```
+
+can never be repaired from Storage Manager, however many times you press the
+button — it runs for about a minute and reports "Unable to complete ...
+because errors occurred". On the NAS this was written for, `/volume1` had been
+corrupt since **February 2021** and every check since had failed that way. A
+manual `e2fsck -fy` fixed it in one pass: 519 repairs, `lost+found` empty.
+
+### The three scripts, in the order you use them
+
+| Script | Root? | What it does |
+|---|---|---|
+| `fsck-preflight.sh` | yes | **READ-ONLY.** Reports whether a manual `e2fsck` is safe to attempt. Mounts nothing, stops nothing, changes nothing. **Run this first.** |
+| `fsck-volume1.sh` | yes | The real repair. Stops the services holding the volume, unmounts it, runs `e2fsck -fy`, remounts. Not a casual thing to run. |
+| `restore-packages.sh` | yes | Re-enables packages afterwards. Safe to run repeatedly. |
+
+All three log to `/var/log/`, which is on the system partition (`md0`) rather
+than the volume being worked on — a log written to the volume you are about to
+unmount is a log you cannot read when it matters.
+
+Run them from **Task Scheduler as root**, not over SSH: the command is just
+the script's path.
+
+### `synopkg stop` disables a package, it does not merely stop it
+
+This is the trap, and it cost two days here. `synopkg stop` **clears the
+package's `enabled` marker**, and that marker is what DSM reads at boot to
+decide what to start. So a loop like
+
+```sh
+for pkg in $(synopkg list --name); do synopkg stop "$pkg"; done
+```
+
+does not stop 25 packages — it *disables* them, permanently. The NAS came back
+from an unrelated power cut two days later running almost nothing, and the
+owner's offsite backup had silently not run in that time. Nobody noticed,
+because a package that was never scheduled to start does not log an error.
+
+**To free a volume, stop the systemd units instead:**
+
+```sh
+systemctl stop pkg-*.service pgsql.service synologand.service
+```
+
+Same effect on the mount, markers untouched. `fsck-volume1.sh` does it this
+way now; `restore-packages.sh` exists to repair databases damaged by the
+earlier version.
+
+One more reason this stayed invisible: **`synopkg start` as a non-root user
+returns `{"success":true}`** at the "prepare" stage and changes nothing at
+all. It looks like it worked.
+
+### DSM facts these scripts encode, which will cost you hours otherwise
+
+- **`/tmp` is mounted `noexec`.** Anything you write there and try to run
+  fails, including `setsid` wrappers. Pick a working directory that permits
+  execution and is not on the volume you are unmounting.
+- **`dumpe2fs`, `fuser` and `lsof` are not installed.** `tune2fs` and `df`
+  are, and you can walk `/proc/*/fd` for open files.
+- **Killing a supervised process achieves nothing** — DSM respawns it. Stop
+  the unit.
+- **Kernel `sataN` names re-enumerate between boots and do NOT match DSM's
+  Drive numbers.** The failing disk here was DSM "Drive 2" but kernel `sata3`.
+  Following the kernel name would have pulled a **healthy** drive out of a
+  degraded array. Identify the disk by serial number, in Storage Manager.
+- **SMART self-tests log internally, not to `dmesg`.** A clean `dmesg` after a
+  test is not evidence of a clean test; read the SMART log itself. Believing
+  otherwise here meant declaring a disk healthy that shed 14 more bad sectors
+  during the next fsck.
