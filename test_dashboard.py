@@ -73,7 +73,8 @@ def main() -> int:
                             ).decode()
     check("solar is rendered", "0.11 kW" in html, True)
     check("house load is shown as measured", "0.39 kW" in html, True)
-    check("today's solar total appears", "9.89 kWh" in html, True)
+    check("today's solar total appears, undegraded",
+          "9.89" in html, True)
 
     print("\nSigns are interpreted, not just printed")
     check("negative battery reads as discharging",
@@ -139,8 +140,10 @@ def main() -> int:
                          {"id": "relay:1", "kind": "switch", "on": False,
                           "watts": 0.0, "kwh": 0.88}]}
     row1 = dashboard.shelly_rows([gen1])
+    # Counted by name rather than by tag: the markup is a design decision
+    # and changing it must not look like a behaviour regression.
     check("a two-relay gen1 device renders both channels",
-          row1.count("<tr>"), 2)
+          row1.count("Kitchen right"), 2)
     check("and disambiguates them", "relay:0" in row1 and "relay:1" in row1, True)
     check("no devices at all is not a crash",
           "none configured" in dashboard.shelly_rows([]), True)

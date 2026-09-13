@@ -411,80 +411,94 @@ def watts(value):
     return f"{value:.0f} W"
 
 
-def flow_rows(sigen: dict) -> str:
-    """The energy balance, as rows rather than a diagram.
+def bar(value, peak, tone) -> str:
+    """A proportional bar. Pure CSS, because a chart library is a CDN away
+    and this page has to render over an SSH tunnel with nothing installed."""
+    if not value or not peak or peak <= 0:
+        return '<div class="bar"></div>'
+    width = max(1.5, min(100.0, abs(value) / peak * 100.0))
+    return (f'<div class="bar"><i style="width:{width:.1f}%" '
+            f'class="t-{tone}"></i></div>')
 
-    A Sankey would be prettier and would need a library, a CDN and a build
-    step -- none of which this project has. Rows are legible at 2am.
+
+def flow_rows(sigen: dict) -> str:
+    """The four quantities that make up the house's energy balance.
+
+    Shown as proportional bars against the largest of them, because the point
+    is the RELATIONSHIP -- 11 kW into the battery while the house uses 0.5 --
+    and four numbers in a column do not show that.
     """
     if sigen.get("error"):
-        return (f'<tr><td colspan="3" class="muted">Sigen cloud unavailable '
-                f'&mdash; {escape(sigen["error"])}</td></tr>')
-    battery = sigen.get("battery")
-    grid = sigen.get("grid")
+        return (f'<p class="empty">Sigen cloud unavailable &mdash; '
+                f'{escape(sigen["error"])}</p>')
+    battery, grid = sigen.get("battery"), sigen.get("grid")
     rows = [
-        ("Solar", kw(sigen.get("solar")), "in" if (sigen.get("solar") or 0) > 0.01 else ""),
-        ("House", kw(sigen.get("load")), "out"),
-        ("Battery",
-         kw(abs(battery) if battery is not None else None),
+        ("Solar", sigen.get("solar"), "solar",
+         "in" if (sigen.get("solar") or 0) > 0.01 else "idle"),
+        ("House", sigen.get("load"), "house", "out"),
+        ("Battery", abs(battery) if battery is not None else None, "batt",
          "charging" if (battery or 0) > 0.01 else
          ("discharging" if (battery or 0) < -0.01 else "idle")),
-        ("Grid",
-         kw(abs(grid) if grid is not None else None),
+        ("Grid", abs(grid) if grid is not None else None, "grid",
          "exporting" if (grid or 0) > 0.01 else
          ("importing" if (grid or 0) < -0.01 else "idle")),
     ]
     if (sigen.get("ev") or 0) > 0.01:
-        rows.append(("EV", kw(sigen["ev"]), "charging"))
+        rows.append(("Car", sigen["ev"], "ev", "charging"))
     if (sigen.get("heat_pump") or 0) > 0.01:
-        rows.append(("Heat pump", kw(sigen["heat_pump"]), "running"))
-    return "".join(
-        f'<tr><td class="label">{escape(name)}</td>'
-        f'<td class="value">{value}</td>'
-        f'<td class="note">{escape(note)}</td></tr>'
-        for name, value, note in rows
-    )
+        rows.append(("Heat pump", sigen["heat_pump"], "heat", "running"))
+
+    peak = max([abs(v) for _n, v, _t, _s in rows if v] or [1.0])
+    out = []
+    for name, value, tone, state in rows:
+        out.append(
+            f'<div class="flow">'
+            f'<div class="fname">{escape(name)}</div>'
+            f'<div class="fbar">{bar(value, peak, tone)}</div>'
+            f'<div class="fval">{kw(value)}</div>'
+            f'<div class="fstate s-{tone}">{escape(state)}</div>'
+            f'</div>')
+    return "".join(out)
 
 
 def shelly_rows(shellys, labels=None) -> str:
     labels = labels or {}
-    out = []
+    live = []
     for device in shellys:
         if device.get("error"):
-            fallback = label_for(device, "", labels)
-            out.append(f'<tr><td class="label">{escape(str(fallback))}</td>'
-                       f'<td class="value">&mdash;</td>'
-                       f'<td class="note">unreachable '
-                       f'({escape(device["error"])})</td></tr>')
+            live.append((label_for(device, "", labels), None,
+                         f'unreachable ({device["error"]})', None))
             continue
         for channel in device["channels"]:
             name = label_for(device, channel["id"], labels)
-            # Only fall back to showing the raw channel id when a multi-channel
-            # device has no per-channel label -- otherwise "Fridge" is enough
-            # and "Fridge . switch:0" is just noise.
             if len(device["channels"]) > 1 and name == label_for(device, "", labels):
-                name = f'{name} &middot; {escape(channel["id"])}'
-            else:
-                name = escape(str(name))
-            note = ""
+                name = f'{name} · {channel["id"]}'
+            state = ""
             if channel["kind"] == "switch":
-                note = "on" if channel.get("on") else "off"
-            out.append(f'<tr><td class="label">{name}</td>'
-                       f'<td class="value">{watts(channel.get("watts"))}</td>'
-                       f'<td class="note">{note}</td></tr>')
-    return "".join(out) or '<tr><td colspan="3" class="muted">none configured</td></tr>'
+                state = "on" if channel.get("on") else "off"
+            live.append((name, channel.get("watts"), state, channel["kind"]))
+
+    if not live:
+        return '<p class="empty">none configured</p>'
+    peak = max([abs(w) for _n, w, _s, _k in live if w] or [1.0])
+    out = []
+    for name, value, state, _kind in live:
+        cls = "on" if state == "on" else ""
+        out.append(
+            f'<div class="circuit">'
+            f'<div class="cname">{escape(str(name))}</div>'
+            f'<div class="cbar">{bar(value, peak, "circuit")}</div>'
+            f'<div class="cval">{watts(value)}</div>'
+            f'<div class="cstate {cls}">{escape(state)}</div>'
+            f'</div>')
+    return "".join(out)
 
 
-def sparkline(points, width=300, height=44, fill=False, zero_base=True) -> str:
-    """An inline SVG line. No library, no CDN, no build step.
-
-    `points` is a list of (label, value). Labels are only used for the title;
-    the x axis is index, which is right for evenly-sampled series and close
-    enough for these.
-    """
+def sparkline(points, width=320, height=48, fill=False, zero_base=True) -> str:
+    """An inline SVG line. No library, no CDN, no build step."""
     values = [v for _, v in points if v is not None]
     if len(values) < 2:
-        return '<span class="muted">not enough data</span>'
+        return '<span class="empty">not enough data</span>'
     low = min(min(values), 0.0) if zero_base else min(values)
     high = max(values)
     span = (high - low) or 1.0
@@ -500,11 +514,11 @@ def sparkline(points, width=300, height=44, fill=False, zero_base=True) -> str:
     area = ""
     if fill and coords:
         area = (f'<polygon points="0,{height} {path} {width},{height}" '
-                f'fill="currentColor" opacity="0.13"/>')
+                f'fill="currentColor" opacity="0.14"/>')
     return (f'<svg class="spark" viewBox="0 0 {width} {height}" '
             f'preserveAspectRatio="none" role="img">'
             f'{area}<polyline points="{path}" fill="none" '
-            f'stroke="currentColor" stroke-width="1.6" '
+            f'stroke="currentColor" stroke-width="1.7" '
             f'vector-effect="non-scaling-stroke"/></svg>')
 
 
@@ -513,15 +527,12 @@ def tariff_block(tariff: dict) -> str:
     if not tariff:
         return ""
     if tariff.get("error"):
-        return (f'<p class="muted">Tariff history unavailable &mdash; '
+        return (f'<p class="empty">Tariff history unavailable &mdash; '
                 f'{escape(tariff["error"])}</p>')
     rows = []
-    for key, title, note in (
-        ("BUY_TARIFF", "Import price",
-         "dips are the cheap window and any IOG bonus slots"),
-        ("SELL_TARIFF", "Export price", ""),
-        ("SOC", "Battery SOC", ""),
-    ):
+    for key, title, tone in (("BUY_TARIFF", "Import price", "peak"),
+                             ("SELL_TARIFF", "Export price", "cheap"),
+                             ("SOC", "Battery SOC", "batt")):
         points = tariff.get(key)
         if not points:
             continue
@@ -533,31 +544,37 @@ def tariff_block(tariff: dict) -> str:
             lo, hi = f"{min(values):.0f}%", f"{max(values):.0f}%"
             now = f"{values[-1]:.1f}%"
         rows.append(
-            f'<tr><td class="label">{escape(title)}<br>'
-            f'<span class="note">{escape(note)}</span></td>'
-            f'<td class="sparkcell">{sparkline(points, fill=True)}</td>'
-            f'<td class="note">{lo} &ndash; {hi}<br>now {now}</td></tr>')
+            f'<div class="sparkrow">'
+            f'<div class="sname">{escape(title)}'
+            f'<span class="srange">{lo} &ndash; {hi}</span></div>'
+            f'<div class="sline g-{tone}">{sparkline(points, fill=True)}</div>'
+            f'<div class="snow">{now}</div>'
+            f'</div>')
     if not rows:
-        return '<p class="muted">No tariff series for today yet.</p>'
-    return f'<table class="sparks">{"".join(rows)}</table>'
+        return '<p class="empty">No tariff series for today yet.</p>'
+    return "".join(rows)
 
 
 def agent_block(agent: dict) -> str:
     if agent.get("error"):
-        return (f'<p class="muted">No agent log at '
+        return (f'<p class="empty">No agent log at '
                 f'{escape(agent["log"])} &mdash; {escape(agent["error"])}</p>')
     bits = []
     seen = agent.get("last_seen")
     if seen:
         age = (datetime.now() - seen).total_seconds()
         stale = age > 900
-        bits.append(f'<p class="{"warn" if stale else ""}">Last tick '
-                    f'{escape(seen.strftime("%H:%M:%S"))} '
-                    f'({age / 60:.0f} min ago)'
-                    f'{" &mdash; STALE, is the agent running?" if stale else ""}'
-                    f'</p>')
-    if agent.get("action"):
-        bits.append(f'<p>Agent: <strong>{escape(agent["action"])}</strong></p>')
+        if stale:
+            bits.append(f'<p class="alarm">Last tick '
+                        f'{escape(seen.strftime("%H:%M:%S"))} '
+                        f'({age / 60:.0f} min ago) &mdash; STALE, is the agent '
+                        f'running?</p>')
+        else:
+            bits.append(f'<p class="meta">Last tick '
+                        f'{escape(seen.strftime("%H:%M:%S"))} '
+                        f'&middot; {age / 60:.0f} min ago &middot; '
+                        f'<strong>{escape(agent.get("action") or "?")}</strong>'
+                        f'</p>')
     slots = agent.get("slots") or []
     if slots:
         rows = []
@@ -566,81 +583,234 @@ def agent_block(agent: dict) -> str:
             when = slot["start"].strftime("%d %b %H:%M")
             if end:
                 mins = (end - slot["start"]).total_seconds() / 60
-                span = f'{when} &rarr; {end.strftime("%H:%M")} ({mins:.0f} min)'
+                span = (f'{when} &rarr; {end.strftime("%H:%M")}'
+                        f'<span class="mins">{mins:.0f} min</span>')
+                live = ""
             else:
                 span = f'{when} &rarr; <strong>still open</strong>'
-            soc = ""
+                live = " live"
+            gain = ""
             if slot.get("soc_start") is not None and slot.get("soc_end") is not None:
-                soc = f'SOC {slot["soc_start"]:.1f}% &rarr; {slot["soc_end"]:.1f}%'
-            rows.append(f'<tr><td class="label">{span}</td>'
-                        f'<td class="note" colspan="2">{soc}</td></tr>')
-        bits.append('<table>' + "".join(rows) + '</table>')
+                gain = (f'{slot["soc_start"]:.0f}% &rarr; {slot["soc_end"]:.0f}%'
+                        f'<span class="delta">'
+                        f'+{slot["soc_end"] - slot["soc_start"]:.0f}</span>')
+            rows.append(f'<div class="slot{live}"><div>{span}</div>'
+                        f'<div class="soc">{gain}</div></div>')
+        bits.append("".join(rows))
     else:
-        bits.append('<p class="muted">No commanded slots in the log yet.</p>')
+        bits.append('<p class="empty">No commanded slots in the log yet.</p>')
     return "".join(bits)
+
+
+def hero(snap: dict) -> str:
+    """The four things worth seeing from across the room."""
+    sigen = snap["sigen"]
+    tariff = snap.get("tariff_soc") or {}
+    cards = []
+
+    buy = (tariff.get("BUY_TARIFF") or [])
+    if buy and not tariff.get("error"):
+        price = buy[-1][1] * 100
+        cheap = price < 10
+        cards.append((f"{price:.2f}p", "per kWh now",
+                      "cheap" if cheap else "peak",
+                      "off-peak" if cheap else "peak rate"))
+
+    soc = sigen.get("soc")
+    if soc is not None:
+        cards.append((f"{soc:.0f}%", "battery", "batt",
+                      f"{soc / 100 * 24.18:.1f} kWh"))
+
+    grid = sigen.get("grid")
+    if grid is not None:
+        cards.append((f"{abs(grid):.1f}", "kW " + ("export" if grid > 0
+                                                   else "import"),
+                      "grid", "exporting" if grid > 0 else "importing"))
+
+    today = sigen.get("solar_today")
+    if today is not None:
+        cards.append((f"{today:.2f} kWh", "solar today", "solar",
+                      "generated"))
+
+    return "".join(
+        f'<div class="card c-{tone}">'
+        f'<div class="big">{escape(value)}</div>'
+        f'<div class="cap">{escape(caption)}</div>'
+        f'<div class="sub">{escape(sub)}</div></div>'
+        for value, caption, tone, sub in cards)
 
 
 def render(snap: dict) -> bytes:
     sigen = snap["sigen"]
-    solar_today = sigen.get("solar_today")
     holding = snap["agent"].get("holding")
     banner = ""
     if holding:
-        banner = ('<div class="banner">Agent is commanding a cheap slot right '
-                  'now &mdash; this import is at the off-peak rate.</div>')
+        banner = ('<div class="banner">Commanding a cheap slot now &mdash; '
+                  'this import is at the off-peak rate</div>')
+    tariff = snap.get("tariff_soc") or {}
     return f"""<!doctype html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta http-equiv="refresh" content="{PAGE_REFRESH_SECONDS}">
+<meta name="color-scheme" content="dark light">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Energy &middot; {snap['at']:%H:%M}</title>
 <style>
-:root {{ color-scheme: light dark; --line:#8883; --muted:#8886; }}
-body {{ font:15px/1.5 -apple-system, system-ui, sans-serif; margin:0;
-        padding:1.2rem; max-width:980px; }}
-h1 {{ font-size:1.1rem; margin:0 0 .2rem; font-weight:600; }}
-h2 {{ font-size:.78rem; text-transform:uppercase; letter-spacing:.09em;
-      margin:1.6rem 0 .4rem; color:var(--muted); font-weight:600; }}
-table {{ border-collapse:collapse; width:100%; }}
-td {{ padding:.34rem 0; border-bottom:1px solid var(--line);
-      vertical-align:baseline; }}
-.label {{ width:45%; }}
-.value {{ width:25%; text-align:right; font-variant-numeric:tabular-nums;
-          font-weight:600; }}
-.note {{ padding-left:1rem; color:var(--muted); font-size:.88rem; }}
-.muted {{ color:var(--muted); }}
-.warn {{ color:#b3261e; font-weight:600; }}
-.banner {{ background:#1e6b34; color:#fff; padding:.55rem .8rem;
-           border-radius:6px; margin:.8rem 0; font-weight:600; }}
-.spark {{ width:100%; height:44px; display:block; color:#4a9; }}
-.sparks .label {{ width:34%; }}
-.sparkcell {{ width:45%; padding:.4rem .8rem; }}
-.grid {{ display:grid; gap:0 2.4rem; grid-template-columns:1fr; }}
-@media (min-width:760px) {{ .grid {{ grid-template-columns:1fr 1fr; }} }}
-footer {{ margin-top:2rem; color:var(--muted); font-size:.82rem; }}
-</style></head><body>
-<h1>8 Sycamore Ave &mdash; {snap['at']:%a %d %b %H:%M:%S}</h1>
-<p class="muted">Read-only. This page cannot switch anything.</p>
-{banner}
-<div class="grid">
-<div>
-<h2>Now</h2>
-<table>{flow_rows(sigen)}</table>
-{'<p class="muted">Solar today: <strong>' + f"{solar_today:.2f}" + ' kWh</strong></p>' if solar_today is not None else ''}
-{'<p class="muted">Battery SOC: <strong>' + f"{sigen['soc']:.1f}" + '%</strong></p>' if sigen.get('soc') is not None else ''}
+:root {{
+  --bg:#0e1113; --panel:#161a1d; --line:#252b30; --text:#e7ecef;
+  --muted:#8b979e; --solar:#e8b64c; --grid:#5aa8e8; --batt:#a98be0;
+  --house:#7f8c94; --cheap:#3fb98c; --peak:#e0705e; --ev:#5fc9c0;
+  --heat:#e08a5e; --circuit:#5f8fa8;
+}}
+@media (prefers-color-scheme: light) {{
+  :root {{ --bg:#f6f7f8; --panel:#fff; --line:#e2e6e9; --text:#151a1d;
+           --muted:#68757c; }}
+}}
+* {{ box-sizing:border-box; }}
+body {{ margin:0; padding:1.1rem; background:var(--bg); color:var(--text);
+  font:15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui,
+  sans-serif; max-width:1080px; }}
+header {{ display:flex; justify-content:space-between; align-items:baseline;
+  flex-wrap:wrap; gap:.4rem; margin-bottom:1rem; }}
+h1 {{ font-size:1.05rem; margin:0; font-weight:650; letter-spacing:-.01em; }}
+.when {{ color:var(--muted); font-size:.85rem;
+  font-variant-numeric:tabular-nums; }}
+.when a {{ color:var(--muted); padding:.35rem 0; display:inline-block; }}
+h2 {{ font-size:.7rem; text-transform:uppercase; letter-spacing:.1em;
+  color:var(--muted); font-weight:650; margin:0 0 .7rem; }}
 
-<h2>Circuits</h2>
-<table>{shelly_rows(snap['shellys'], snap.get('labels'))}</table>
+.cards {{ display:grid; gap:.7rem; grid-template-columns:repeat(2,1fr);
+  margin-bottom:1rem; }}
+@media (min-width:720px) {{ .cards {{ grid-template-columns:repeat(4,1fr); }} }}
+.card {{ background:var(--panel); border:1px solid var(--line);
+  border-radius:12px; padding:.85rem .95rem; position:relative;
+  overflow:hidden; }}
+.card::before {{ content:""; position:absolute; inset:0 auto 0 0; width:3px;
+  background:currentColor; }}
+.big {{ font-size:1.85rem; font-weight:680; letter-spacing:-.02em;
+  font-variant-numeric:tabular-nums; line-height:1.05; color:var(--text); }}
+.cap {{ font-size:.78rem; color:var(--muted); margin-top:.15rem; }}
+.sub {{ font-size:.72rem; color:currentColor; margin-top:.3rem;
+  font-weight:600; opacity:.95; }}
+.c-cheap {{ color:var(--cheap); }} .c-peak {{ color:var(--peak); }}
+.c-batt {{ color:var(--batt); }} .c-grid {{ color:var(--grid); }}
+.c-solar {{ color:var(--solar); }}
+
+.banner {{ background:var(--cheap); color:#04231a; padding:.55rem .85rem;
+  border-radius:10px; font-weight:650; font-size:.9rem; margin-bottom:1rem; }}
+
+.panel {{ background:var(--panel); border:1px solid var(--line);
+  border-radius:12px; padding:.95rem 1rem 1.05rem; margin-bottom:.9rem; }}
+.cols {{ display:grid; gap:.9rem; grid-template-columns:1fr; }}
+@media (min-width:860px) {{ .cols {{ grid-template-columns:1.05fr .95fr; }} }}
+
+.flow, .circuit {{ display:grid; align-items:center; gap:.2rem .6rem;
+  grid-template-columns:7.4rem 1fr 4.6rem 4.4rem;
+  grid-template-areas:"name bar val state"; padding:.32rem 0;
+  border-bottom:1px solid var(--line); }}
+.fname, .cname {{ grid-area:name; }}
+.fbar, .cbar {{ grid-area:bar; min-width:0; }}
+.fval, .cval {{ grid-area:val; }}
+.fstate, .cstate {{ grid-area:state; }}
+.flow:last-child, .circuit:last-child {{ border-bottom:0; }}
+.fname, .cname {{ font-size:.9rem; overflow:hidden; text-overflow:ellipsis;
+  white-space:nowrap; }}
+.fval, .cval {{ text-align:right; font-variant-numeric:tabular-nums;
+  font-weight:640; font-size:.9rem; }}
+.fstate, .cstate {{ font-size:.72rem; color:var(--muted); text-align:right; }}
+.cstate.on {{ color:var(--cheap); font-weight:600; }}
+.bar {{ height:7px; border-radius:4px; background:var(--line);
+  overflow:hidden; }}
+.bar i {{ display:block; height:100%; border-radius:4px; }}
+.t-solar {{ background:var(--solar); }} .t-grid {{ background:var(--grid); }}
+.t-batt {{ background:var(--batt); }} .t-house {{ background:var(--house); }}
+.t-ev {{ background:var(--ev); }} .t-heat {{ background:var(--heat); }}
+.t-circuit {{ background:var(--circuit); }}
+.s-solar {{ color:var(--solar); }} .s-grid {{ color:var(--grid); }}
+.s-batt {{ color:var(--batt); }} .s-ev {{ color:var(--ev); }}
+.s-heat {{ color:var(--heat); }}
+
+@media (max-width:560px) {{
+  body {{ padding:.8rem; }}
+  .flow, .circuit {{ grid-template-columns:1fr 4.4rem 3.6rem;
+    grid-template-areas:"name val state" "bar bar bar"; gap:.15rem .5rem;
+    padding:.45rem 0; }}
+  .fname, .cname {{ white-space:normal; }}
+  .big {{ font-size:1.55rem; }}
+  .card {{ padding:.7rem .75rem; }}
+  .sparkrow {{ grid-template-columns:1fr 3.4rem;
+    grid-template-areas:"name now" "line line"; }}
+  .sname {{ grid-area:name; }} .sline {{ grid-area:line; }}
+  .snow {{ grid-area:now; }}
+  .slot {{ flex-direction:column; gap:.1rem; }}
+  .soc {{ font-size:.8rem; }}
+  header {{ gap:.15rem; }}
+  .when {{ font-size:.8rem; }}
+}}
+.sparkrow {{ display:grid; grid-template-columns:8.5rem 1fr 3.6rem;
+  gap:.6rem; align-items:center; padding:.4rem 0;
+  border-bottom:1px solid var(--line); }}
+.sparkrow:last-child {{ border-bottom:0; }}
+.sname {{ font-size:.85rem; }}
+.srange {{ display:block; color:var(--muted); font-size:.72rem;
+  font-variant-numeric:tabular-nums; }}
+.snow {{ text-align:right; font-weight:640; font-size:.88rem;
+  font-variant-numeric:tabular-nums; }}
+.spark {{ width:100%; height:40px; display:block; }}
+.g-peak {{ color:var(--peak); }} .g-cheap {{ color:var(--cheap); }}
+.g-batt {{ color:var(--batt); }}
+
+.slot {{ display:flex; justify-content:space-between; gap:.6rem;
+  padding:.36rem 0; border-bottom:1px solid var(--line); font-size:.85rem;
+  font-variant-numeric:tabular-nums; }}
+.slot:last-child {{ border-bottom:0; }}
+.slot.live {{ color:var(--cheap); font-weight:600; }}
+.mins {{ color:var(--muted); margin-left:.45rem; font-weight:400; }}
+.soc {{ color:var(--muted); white-space:nowrap; }}
+.delta {{ color:var(--cheap); margin-left:.4rem; font-weight:640; }}
+.meta {{ color:var(--muted); font-size:.82rem; margin:0 0 .6rem; }}
+.alarm {{ color:var(--peak); font-weight:640; font-size:.85rem;
+  margin:0 0 .6rem; }}
+.empty {{ color:var(--muted); font-size:.85rem; margin:.2rem 0; }}
+footer {{ color:var(--muted); font-size:.75rem; line-height:1.5;
+  margin-top:.4rem; }}
+footer code {{ font-size:.95em; }}
+</style></head><body>
+<header>
+  <h1>8 Sycamore Ave</h1>
+  <div class="when">{snap['at']:%a %d %b %H:%M:%S} &middot;
+    <a href="/report?period=today">report</a> &middot; read-only</div>
+</header>
+
+<div class="cards">{hero(snap)}</div>
+{banner}
+
+<div class="cols">
+  <div>
+    <div class="panel">
+      <h2>Now</h2>
+      {flow_rows(sigen)}
+    </div>
+    <div class="panel">
+      <h2>Circuits</h2>
+      {shelly_rows(snap['shellys'], snap.get('labels'))}
+    </div>
+  </div>
+  <div>
+    <div class="panel">
+      <h2>Agent &amp; cheap slots</h2>
+      {agent_block(snap['agent'])}
+    </div>
+    {('<div class="panel"><h2>Today</h2>' + tariff_block(tariff) + '</div>')
+     if tariff else ''}
+  </div>
 </div>
-<div>
-<h2>Agent &amp; cheap slots</h2>
-{agent_block(snap['agent'])}
-{('<h2>Today</h2>' + tariff_block(snap.get('tariff_soc') or {})) if snap.get('tariff_soc') else ''}
-</div>
-</div>
+
 <footer>
 Solar is <code>thirdPvPower</code> (the SolarEdge, AC-coupled via the gateway)
-plus <code>pvPower</code> (the SigenStor's own MPPTs, 0 on this plant).
-House load is measured, not derived. Plant state comes from the agent's log,
-never from a second Modbus connection &mdash; two readers on a link with a
+plus <code>pvPower</code> (the SigenStor's own MPPTs, 0 on this plant). House
+load is measured, not derived. Plant state comes from the agent's log, never
+from a second Modbus connection &mdash; two readers on a link with a
 1&thinsp;s minimum would starve the thing that commands the battery.
 Refreshes every {PAGE_REFRESH_SECONDS}s.
 </footer>
@@ -1081,7 +1251,7 @@ def render_report(rep: dict) -> bytes:
                         f'</td></tr>')
 
     return f"""<!doctype html><html><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Energy &middot; {escape(rep['label'])}</title>
 <style>
 :root {{ color-scheme: light dark; --line:#8883; --muted:#8886; }}
