@@ -679,6 +679,13 @@ h1 {{ font-size:1.05rem; margin:0; font-weight:650; letter-spacing:-.01em; }}
 h2 {{ font-size:.7rem; text-transform:uppercase; letter-spacing:.1em;
   color:var(--muted); font-weight:650; margin:0 0 .7rem; }}
 
+.nav-shared {{}}
+nav {{ display:flex; flex-wrap:wrap; gap:.4rem; margin:0 0 1rem; }}
+nav a {{ padding:.34rem .75rem; border:1px solid var(--line);
+  border-radius:7px; text-decoration:none; color:var(--muted);
+  font-size:.85rem; background:var(--panel); }}
+nav a.on {{ background:var(--cheap); color:#04231a; border-color:var(--cheap);
+  font-weight:650; }}
 .cards {{ display:grid; gap:.7rem; grid-template-columns:repeat(2,1fr);
   margin-bottom:1rem; }}
 @media (min-width:720px) {{ .cards {{ grid-template-columns:repeat(4,1fr); }} }}
@@ -778,9 +785,16 @@ footer code {{ font-size:.95em; }}
 </style></head><body>
 <header>
   <h1>8 Sycamore Ave</h1>
-  <div class="when">{snap['at']:%a %d %b %H:%M:%S} &middot;
-    <a href="/report?period=today">report</a> &middot; read-only</div>
+  <div class="when">{snap['at']:%a %d %b %H:%M:%S} &middot; read-only</div>
 </header>
+<nav>
+  <a class="on" href="/">Live</a>
+  <a href="/report?period=today">Today</a>
+  <a href="/report?period=yesterday">Yesterday</a>
+  <a href="/report?period=last7">Last 7 days</a>
+  <a href="/report?period=month">This month</a>
+  <a href="/report?period=lastmonth">Last month</a>
+</nav>
 
 <div class="cards">{hero(snap)}</div>
 {banner}
@@ -1177,7 +1191,7 @@ def kwh(value, dp=2):
 
 
 def render_report(rep: dict) -> bytes:
-    tabs = " ".join(
+    tabs = '<a href="/">Live</a> ' + " ".join(
         f'<a class="{"on" if key == rep["period"] else ""}" '
         f'href="/report?period={key}">{escape(name)}</a>'
         for key, name, _kind in PERIODS)
