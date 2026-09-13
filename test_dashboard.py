@@ -195,11 +195,44 @@ def main() -> int:
     check("a flat series does not divide by zero",
           dashboard.sparkline([("a", 5), ("b", 5)]).startswith("<svg"), True)
 
+    print("\nThe CURRENT price, not the last point in the series")
+    # BUY_TARIFF carries all 288 points for the whole day including the
+    # FUTURE, so points[-1] is always 23:55 -- inside the guaranteed cheap
+    # window. The price card therefore read "4.49p off-peak" at any hour of
+    # the day. SOC hid it, because its series stops at the present.
+    day = dt.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    series = []
+    for i in range(288):
+        when = day + dt.timedelta(minutes=5 * i)
+        cheap = when.time() >= dt.time(23, 30) or when.time() < dt.time(5, 30)
+        series.append((when.strftime("%Y%m%d %H:%M"), 0.0449 if cheap else 0.29757))
+
+    noon = [(w, v) for w, v in series
+            if w <= day.replace(hour=12).strftime("%Y%m%d %H:%M")]
+    check("midday reads the midday value, not 23:55",
+          dashboard.value_now(noon), 0.29757)
+    check("the last point of a full day is NOT what we want",
+          series[-1][1], 0.0449)
+
+    # A series entirely in the future (the day has not started) must not
+    # return None and blank the card.
+    future = [((day + dt.timedelta(days=1)).strftime("%Y%m%d %H:%M"), 0.1)]
+    check("a not-yet-started series falls back to its first point",
+          dashboard.value_now(future), 0.1)
+    check("an empty series is None, not an exception",
+          dashboard.value_now([]), None)
+    check("an unparseable label does not crash it",
+          dashboard.value_now([("not a time", 0.2)]), 0.2)
+
     print("\nThe tariff block answers 'was it cheap when we charged?'")
-    tariff = {"BUY_TARIFF": [("20260913 00:00", 0.0449),
-                             ("20260913 12:00", 0.2976),
-                             ("20260913 23:55", 0.0449)],
-              "SOC": [("20260913 00:00", 1.0), ("20260913 23:55", 97.5)]}
+    # Time-relative, not hard-coded: value_now compares against the clock, so
+    # a fixture pinned to one date would assert the wrong thing tomorrow. The
+    # last point is deliberately in the PAST so "now" is well defined.
+    _d = dt.datetime.now().replace(second=0, microsecond=0)
+    _t = lambda mins: (_d - dt.timedelta(minutes=mins)).strftime("%Y%m%d %H:%M")
+    tariff = {"BUY_TARIFF": [(_t(600), 0.0449), (_t(300), 0.2976),
+                             (_t(5), 0.0449)],
+              "SOC": [(_t(600), 1.0), (_t(5), 97.5)]}
     block = dashboard.tariff_block(tariff)
     check("prices are shown in pence", "4.49p" in block, True)
     check("and the peak too", "29.76p" in block, True)

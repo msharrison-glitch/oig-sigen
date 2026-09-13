@@ -494,6 +494,34 @@ def shelly_rows(shellys, labels=None) -> str:
     return "".join(out)
 
 
+def value_now(points):
+    """The value for the CURRENT half hour, not the last point in the series.
+
+    BUY_TARIFF and SELL_TARIFF carry all 288 five-minute points for the whole
+    day, INCLUDING THE FUTURE. Taking points[-1] therefore always read 23:55,
+    which is inside the guaranteed cheap window -- so the price card showed
+    "4.49p off-peak" at two in the afternoon. SOC hid the bug because its
+    series stops at the present, making its last point genuinely current.
+
+    Returns the latest point at or before now, falling back to the first
+    point if the series has not started yet.
+    """
+    if not points:
+        return None
+    now = datetime.now()
+    best = None
+    for label, value in points:
+        try:
+            when = datetime.strptime(label, "%Y%m%d %H:%M")
+        except (ValueError, TypeError):
+            continue
+        if when <= now:
+            best = value
+        else:
+            break
+    return best if best is not None else points[0][1]
+
+
 def sparkline(points, width=320, height=48, fill=False, zero_base=True) -> str:
     """An inline SVG line. No library, no CDN, no build step."""
     values = [v for _, v in points if v is not None]
@@ -537,12 +565,15 @@ def tariff_block(tariff: dict) -> str:
         if not points:
             continue
         values = [v for _, v in points]
+        current = value_now(points)
+        if current is None:
+            current = values[-1]
         if key.endswith("TARIFF"):
             lo, hi = f"{min(values) * 100:.2f}p", f"{max(values) * 100:.2f}p"
-            now = f"{values[-1] * 100:.2f}p"
+            now = f"{current * 100:.2f}p"
         else:
             lo, hi = f"{min(values):.0f}%", f"{max(values):.0f}%"
-            now = f"{values[-1]:.1f}%"
+            now = f"{current:.1f}%"
         rows.append(
             f'<div class="sparkrow">'
             f'<div class="sname">{escape(title)}'
@@ -610,7 +641,8 @@ def hero(snap: dict) -> str:
 
     buy = (tariff.get("BUY_TARIFF") or [])
     if buy and not tariff.get("error"):
-        price = buy[-1][1] * 100
+        current = value_now(buy)
+        price = (current if current is not None else buy[0][1]) * 100
         cheap = price < 10
         cards.append((f"{price:.2f}p", "per kWh now",
                       "cheap" if cheap else "peak",
