@@ -136,10 +136,16 @@ free -m >> "$LOG" 2>&1
 tune2fs -l "$DEV" 2>/dev/null | grep -iE "Filesystem state|Inode count|Block count|Last checked" >> "$LOG"
 
 # ---------------------------------------------------------------- quiesce
-log "--- stopping packages ---"
-for pkg in $(/usr/syno/bin/synopkg list --name 2>/dev/null); do
-    /usr/syno/bin/synopkg stop "$pkg" >/dev/null 2>&1 && log "  stopped $pkg"
-done
+# NOT `synopkg stop`. On DSM 7 that also CLEARS the package's `enabled`
+# marker, which is what DSM reads at boot to decide what to start -- so the
+# packages are not stopped, they are DISABLED, and they do not come back after
+# a reboot. This script did exactly that on 2026-09-11 and the NAS came up
+# from a power cut two days later running almost nothing, offsite backup
+# included. Stopping the systemd units achieves the same unmount and leaves
+# the markers alone; `restore-packages.sh` exists to clean up after the
+# earlier version.
+log "--- stopping package services (units, NOT synopkg) ---"
+systemctl stop "pkg-*.service" >/dev/null 2>&1 && log "  stopped pkg-* units"
 
 log "--- stopping indexing and thumbnail daemons ---"
 for d in synoindexd synomkthumbd synomkflvd synomkflvd synoindexplugind; do
@@ -213,7 +219,6 @@ log "--- stopping services that hold $VOLUME ---"
 for u in pgsql.service synologand.service synoindexd.service; do
     systemctl stop "$u" >/dev/null 2>&1 && log "  systemctl stop $u"
 done
-systemctl stop "pkg-*.service" >/dev/null 2>&1 && log "  stopped pkg-* units"
 stop_holder_units
 
 log "--- unmounting $VOLUME ---"
