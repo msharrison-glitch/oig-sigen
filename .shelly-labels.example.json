@@ -1,0 +1,37 @@
+{
+  "_comment": [
+    "Friendly names for Shelly devices and channels, used by dashboard.py.",
+    "",
+    "This file exists because the Shelly APP stores the name you set in SHELLY",
+    "CLOUD, not on the device: sys.device.name reads null over the LAN, so a",
+    "local-only dashboard cannot see it. Naming a device in its OWN web UI",
+    "(http://<ip> -> Settings) does write it down, and the dashboard prefers",
+    "that when present -- this file is the override and the fallback.",
+    "",
+    "It is also the only way to label a multi-channel device. A Pro 3EM has",
+    "three CT clamps on three unrelated circuits and one device name, so the",
+    "channels have to be named somewhere.",
+    "",
+    "A string names the whole device. An object names channels by their id,",
+    "as reported by the device: 'switch:0' on a Gen2 plug, 'relay:0' and",
+    "'relay:1' on a Gen1 two-relay device, 'em1:0'..'em1:2' on a Pro 3EM.",
+    "",
+    "Copy to .shelly-labels.json and edit. That file is gitignored: which",
+    "circuits are in your house is nobody else's business."
+  ],
+
+  "192.168.0.11": "Fridge",
+  "192.168.0.12": "Air fryer",
+  "192.168.0.13": "Washer / dryer",
+
+  "192.168.0.20": {
+    "relay:0": "Kitchen left",
+    "relay:1": "Kitchen right"
+  },
+
+  "192.168.0.30": {
+    "em1:0": "Hob & oven",
+    "em1:1": "Lounge / bedroom",
+    "em1:2": "Office AC"
+  }
+}

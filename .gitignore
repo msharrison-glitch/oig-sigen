@@ -41,3 +41,4 @@ service-status.txt
 .daikin-consumption.json
 .daikin-snapshot.log
 daikin-snapshot.log
+.shelly-labels.json

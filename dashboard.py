@@ -196,16 +196,77 @@ def read_agent(log_path: str) -> dict:
     return out
 
 
-def snapshot(shelly_hosts, log_path) -> dict:
+def load_labels(path: str) -> dict:
+    """Friendly names for devices and channels.
+
+    Needed because the Shelly APP stores the name you set in Shelly Cloud,
+    not on the device -- `sys.device.name` reads null over the LAN. It is also
+    the only way to name a Pro 3EM's three clamps, which sit on three
+    unrelated circuits behind one device name.
+    """
+    try:
+        return json.loads(io.open(path, encoding="utf-8").read())
+    except (OSError, ValueError):
+        return {}
+
+
+def label_for(device: dict, channel_id: str, labels: dict) -> str:
+    """Config wins, then the device's own name, then the model, then the IP."""
+    entry = labels.get(device["host"])
+    if isinstance(entry, dict):
+        named = entry.get(channel_id)
+        if named:
+            return named
+    elif isinstance(entry, str) and entry:
+        return entry
+    return (device.get("name") or device.get("model") or device["host"])
+
+
+def read_tariff_soc(day: str | None = None) -> dict:
+    """Today's price and SOC, five-minute resolution, from the Sigen cloud.
+
+    This is the series the whole project is about: BUY_TARIFF shows the IOG
+    bonus slots as the plant itself sees them, so plotting SOC against it
+    answers "did we actually charge when it was cheap" from one source.
+    """
+    day = day or datetime.now().strftime("%Y%m%d")
+    try:
+        import sigencloud
+        client = sigencloud.client_from_env()
+        client.ensure()
+        data = client._call(
+            "GET",
+            f"data-process/sigen/station/statistics/tariff-soc/day"
+            f"?stationId={client.station_id}&dt={day}&needPrediction=false",
+        ).get("data") or {}
+    except Exception as exc:                      # noqa: BLE001
+        return {"error": f"{type(exc).__name__}"}
+
+    out = {}
+    for series in data.get("dataSeries") or []:
+        name = series.get("id")
+        if name == "VIRTUAL_BATTERY_SOC":
+            continue                               # constant 50 here; noise
+        points = [(p.get("time"), p.get("value"))
+                  for p in (series.get("points") or [])
+                  if p.get("value") is not None]
+        if points:
+            out[name] = points
+    return out
+
+
+def snapshot(shelly_hosts, log_path, labels=None, history=False) -> dict:
     """Everything, gathered in parallel so the slowest source sets the pace."""
-    result = {"at": datetime.now()}
-    with ThreadPoolExecutor(max_workers=8) as pool:
+    result = {"at": datetime.now(), "labels": labels or {}}
+    with ThreadPoolExecutor(max_workers=10) as pool:
         sigen = pool.submit(read_sigen)
         agent = pool.submit(read_agent, log_path)
+        tariff = pool.submit(read_tariff_soc) if history else None
         shellys = [pool.submit(read_shelly, h) for h in shelly_hosts]
         result["sigen"] = sigen.result()
         result["agent"] = agent.result()
         result["shellys"] = [f.result() for f in shellys]
+        result["tariff_soc"] = tariff.result() if tariff else {}
     return result
 
 
@@ -260,20 +321,24 @@ def flow_rows(sigen: dict) -> str:
     )
 
 
-def shelly_rows(shellys) -> str:
+def shelly_rows(shellys, labels=None) -> str:
+    labels = labels or {}
     out = []
     for device in shellys:
-        title = device.get("name") or device.get("model") or device["host"]
         if device.get("error"):
-            out.append(f'<tr><td class="label">{escape(str(title))}</td>'
+            fallback = label_for(device, "", labels)
+            out.append(f'<tr><td class="label">{escape(str(fallback))}</td>'
                        f'<td class="value">&mdash;</td>'
                        f'<td class="note">unreachable '
                        f'({escape(device["error"])})</td></tr>')
             continue
         for channel in device["channels"]:
-            name = title
-            if len(device["channels"]) > 1:
-                name = f"{title} &middot; {escape(channel['id'])}"
+            name = label_for(device, channel["id"], labels)
+            # Only fall back to showing the raw channel id when a multi-channel
+            # device has no per-channel label -- otherwise "Fridge" is enough
+            # and "Fridge . switch:0" is just noise.
+            if len(device["channels"]) > 1 and name == label_for(device, "", labels):
+                name = f'{name} &middot; {escape(channel["id"])}'
             else:
                 name = escape(str(name))
             note = ""
@@ -283,6 +348,73 @@ def shelly_rows(shellys) -> str:
                        f'<td class="value">{watts(channel.get("watts"))}</td>'
                        f'<td class="note">{note}</td></tr>')
     return "".join(out) or '<tr><td colspan="3" class="muted">none configured</td></tr>'
+
+
+def sparkline(points, width=300, height=44, fill=False, zero_base=True) -> str:
+    """An inline SVG line. No library, no CDN, no build step.
+
+    `points` is a list of (label, value). Labels are only used for the title;
+    the x axis is index, which is right for evenly-sampled series and close
+    enough for these.
+    """
+    values = [v for _, v in points if v is not None]
+    if len(values) < 2:
+        return '<span class="muted">not enough data</span>'
+    low = min(min(values), 0.0) if zero_base else min(values)
+    high = max(values)
+    span = (high - low) or 1.0
+    step = width / (len(points) - 1)
+    coords = []
+    for i, (_, value) in enumerate(points):
+        if value is None:
+            continue
+        x = i * step
+        y = height - ((value - low) / span) * height
+        coords.append(f"{x:.1f},{y:.1f}")
+    path = " ".join(coords)
+    area = ""
+    if fill and coords:
+        area = (f'<polygon points="0,{height} {path} {width},{height}" '
+                f'fill="currentColor" opacity="0.13"/>')
+    return (f'<svg class="spark" viewBox="0 0 {width} {height}" '
+            f'preserveAspectRatio="none" role="img">'
+            f'{area}<polyline points="{path}" fill="none" '
+            f'stroke="currentColor" stroke-width="1.6" '
+            f'vector-effect="non-scaling-stroke"/></svg>')
+
+
+def tariff_block(tariff: dict) -> str:
+    """Price and SOC for today, which is the question this project asks."""
+    if not tariff:
+        return ""
+    if tariff.get("error"):
+        return (f'<p class="muted">Tariff history unavailable &mdash; '
+                f'{escape(tariff["error"])}</p>')
+    rows = []
+    for key, title, note in (
+        ("BUY_TARIFF", "Import price",
+         "dips are the cheap window and any IOG bonus slots"),
+        ("SELL_TARIFF", "Export price", ""),
+        ("SOC", "Battery SOC", ""),
+    ):
+        points = tariff.get(key)
+        if not points:
+            continue
+        values = [v for _, v in points]
+        if key.endswith("TARIFF"):
+            lo, hi = f"{min(values) * 100:.2f}p", f"{max(values) * 100:.2f}p"
+            now = f"{values[-1] * 100:.2f}p"
+        else:
+            lo, hi = f"{min(values):.0f}%", f"{max(values):.0f}%"
+            now = f"{values[-1]:.1f}%"
+        rows.append(
+            f'<tr><td class="label">{escape(title)}<br>'
+            f'<span class="note">{escape(note)}</span></td>'
+            f'<td class="sparkcell">{sparkline(points, fill=True)}</td>'
+            f'<td class="note">{lo} &ndash; {hi}<br>now {now}</td></tr>')
+    if not rows:
+        return '<p class="muted">No tariff series for today yet.</p>'
+    return f'<table class="sparks">{"".join(rows)}</table>'
 
 
 def agent_block(agent: dict) -> str:
@@ -353,6 +485,9 @@ td {{ padding:.34rem 0; border-bottom:1px solid var(--line);
 .warn {{ color:#b3261e; font-weight:600; }}
 .banner {{ background:#1e6b34; color:#fff; padding:.55rem .8rem;
            border-radius:6px; margin:.8rem 0; font-weight:600; }}
+.spark {{ width:100%; height:44px; display:block; color:#4a9; }}
+.sparks .label {{ width:34%; }}
+.sparkcell {{ width:45%; padding:.4rem .8rem; }}
 .grid {{ display:grid; gap:0 2.4rem; grid-template-columns:1fr; }}
 @media (min-width:760px) {{ .grid {{ grid-template-columns:1fr 1fr; }} }}
 footer {{ margin-top:2rem; color:var(--muted); font-size:.82rem; }}
@@ -368,11 +503,12 @@ footer {{ margin-top:2rem; color:var(--muted); font-size:.82rem; }}
 {'<p class="muted">Battery SOC: <strong>' + f"{sigen['soc']:.1f}" + '%</strong></p>' if sigen.get('soc') is not None else ''}
 
 <h2>Circuits</h2>
-<table>{shelly_rows(snap['shellys'])}</table>
+<table>{shelly_rows(snap['shellys'], snap.get('labels'))}</table>
 </div>
 <div>
 <h2>Agent &amp; cheap slots</h2>
 {agent_block(snap['agent'])}
+{('<h2>Today</h2>' + tariff_block(snap.get('tariff_soc') or {})) if snap.get('tariff_soc') else ''}
 </div>
 </div>
 <footer>
@@ -405,7 +541,7 @@ class _Cache:
             return self.value
 
 
-def make_handler(shelly_hosts, log_path, cache):
+def make_handler(shelly_hosts, log_path, cache, labels=None, history=True):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args):
             pass                                   # quiet by default
@@ -416,11 +552,11 @@ def make_handler(shelly_hosts, log_path, cache):
                 body = b"ok"
                 ctype = "text/plain"
             elif path in ("/", "/index.html"):
-                snap = cache.get(lambda: snapshot(shelly_hosts, log_path))
+                snap = cache.get(lambda: snapshot(shelly_hosts, log_path, labels, history))
                 body = render(snap)
                 ctype = "text/html; charset=utf-8"
             elif path == "/snapshot.json":
-                snap = cache.get(lambda: snapshot(shelly_hosts, log_path))
+                snap = cache.get(lambda: snapshot(shelly_hosts, log_path, labels, history))
                 body = json.dumps(snap, default=str, indent=1).encode()
                 ctype = "application/json"
             else:
@@ -460,11 +596,20 @@ def main() -> int:
                         help="Shelly host or IP; repeatable. Falls back to "
                              "IOG_SHELLY_HOSTS in .env")
     parser.add_argument("--log", default=DEFAULT_LOG)
+    parser.add_argument("--labels", default=".shelly-labels.json",
+                        help="JSON of friendly names; the Shelly app keeps "
+                             "names in Shelly Cloud, not on the device, so a "
+                             "LAN-only dashboard cannot read them")
+    parser.add_argument("--no-history", action="store_true",
+                        help="skip the tariff/SOC series (one extra cloud "
+                             "call per refresh)")
     args = parser.parse_args()
 
     hosts = shelly_hosts_from(args)
+    labels = load_labels(args.labels)
+    history = not args.no_history
     if args.once:
-        snap = snapshot(hosts, args.log)
+        snap = snapshot(hosts, args.log, labels, history)
         print(json.dumps(snap, default=str, indent=1))
         return 0
 
@@ -473,10 +618,11 @@ def main() -> int:
         return 2
 
     cache = _Cache(CACHE_SECONDS)
-    handler = make_handler(hosts, args.log, cache)
+    handler = make_handler(hosts, args.log, cache, labels, history)
     server = ThreadingHTTPServer((args.bind, args.port), handler)
     print(f"dashboard on http://{args.bind}:{args.port}  "
-          f"({len(hosts)} Shelly host(s), log {args.log})")
+          f"({len(hosts)} Shelly host(s), {len(labels)} label(s), "
+          f"log {args.log})")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

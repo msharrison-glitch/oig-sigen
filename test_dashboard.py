@@ -145,6 +145,68 @@ def main() -> int:
     check("no devices at all is not a crash",
           "none configured" in dashboard.shelly_rows([]), True)
 
+    print("\nLabels, because the Shelly app keeps names in the cloud")
+    # sys.device.name reads null over the LAN when you name a device in the
+    # app rather than its own web UI, so config has to be able to override.
+    labels = {"192.168.2.149": "Fridge",
+              "192.168.2.191": {"em1:0": "Hob & oven",
+                                "em1:2": "Office AC"}}
+    plug = {"host": "192.168.2.149", "name": None, "model": "SNPL-00112UK",
+            "channels": [{"id": "switch:0", "kind": "switch", "on": True,
+                          "watts": 39.9}]}
+    check("config names an unnamed device",
+          dashboard.label_for(plug, "switch:0", labels), "Fridge")
+    named_device = dict(plug, host="10.0.0.9", name="Set on the device")
+    check("a device's own name is used when config is silent",
+          dashboard.label_for(named_device, "switch:0", labels),
+          "Set on the device")
+    bare = {"host": "10.0.0.8", "name": None, "model": None, "channels": []}
+    check("and the IP is the last resort",
+          dashboard.label_for(bare, "x", labels), "10.0.0.8")
+
+    em = {"host": "192.168.2.191", "name": None, "model": "SPEM-003CEBEU",
+          "channels": [{"id": "em1:0", "kind": "meter", "watts": -1.3},
+                       {"id": "em1:1", "kind": "meter", "watts": 8.2},
+                       {"id": "em1:2", "kind": "meter", "watts": 7.9}]}
+    check("a 3EM clamp gets its own name",
+          dashboard.label_for(em, "em1:0", labels), "Hob & oven")
+    rows = dashboard.shelly_rows([em], labels)
+    check("labelled clamps render by name", "Hob &amp; oven" in rows, True)
+    check("an unlabelled clamp still shows its id",
+          "em1:1" in rows, True)
+    check("a labelled single-channel plug is not suffixed with its id",
+          "switch:0" in dashboard.shelly_rows([plug], labels), False)
+    check("a missing labels file is not fatal",
+          dashboard.load_labels("/nonexistent/x.json"), {})
+
+    print("\nSparklines are inline SVG -- no library, no CDN")
+    series = [(f"t{i}", v) for i, v in enumerate([1, 3, 2, 5, 4, 6])]
+    svg = dashboard.sparkline(series)
+    check("produces an svg", svg.startswith("<svg"), True)
+    check("with a polyline", "<polyline" in svg, True)
+    check("and no external reference", "http" in svg, False)
+    check("one point is not a line",
+          "not enough data" in dashboard.sparkline([("t", 1)]), True)
+    check("an empty series says so",
+          "not enough data" in dashboard.sparkline([]), True)
+    check("a flat series does not divide by zero",
+          dashboard.sparkline([("a", 5), ("b", 5)]).startswith("<svg"), True)
+
+    print("\nThe tariff block answers 'was it cheap when we charged?'")
+    tariff = {"BUY_TARIFF": [("20260913 00:00", 0.0449),
+                             ("20260913 12:00", 0.2976),
+                             ("20260913 23:55", 0.0449)],
+              "SOC": [("20260913 00:00", 1.0), ("20260913 23:55", 97.5)]}
+    block = dashboard.tariff_block(tariff)
+    check("prices are shown in pence", "4.49p" in block, True)
+    check("and the peak too", "29.76p" in block, True)
+    check("SOC is a percentage", "97.5%" in block, True)
+    check("an unavailable series degrades",
+          "unavailable" in dashboard.tariff_block({"error": "TimeoutError"}),
+          True)
+    check("no tariff data at all is empty, not broken",
+          dashboard.tariff_block({}), "")
+
     print("\nFormatting helpers")
     check("None power is a dash, not 0", dashboard.kw(None), "&mdash;")
     check("None watts is a dash", dashboard.watts(None), "&mdash;")
