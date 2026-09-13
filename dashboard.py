@@ -932,9 +932,35 @@ def report_zappi(start, end) -> dict:
         return {"error": f"{type(exc).__name__}"}
 
 
-def report_daikin(start, end) -> dict:
-    """Heat pump kWh, from the archives daikin.py maintains."""
+def report_daikin(start, end, kind="day") -> dict:
+    """Heat pump kWh, from whichever archive daikin.py keeps for that span.
+
+    A WHOLE MONTH must come from the monthly archive, not by summing days.
+    The daily archive only began on 2026-09-13 and reaches back a fortnight,
+    so asking it for August returned 31 August alone and reported one day as
+    a month -- 2 kWh where the real figure was 67. The monthly file has run
+    since January 2025 and is authoritative for any complete month.
+    """
     out = {"climateControl": 0.0, "domesticHotWaterTank": 0.0, "days": 0}
+
+    if kind == "month" and start.day == 1:
+        try:
+            monthly = json.loads(io.open(
+                state_path(".daikin-consumption.json"), encoding="utf-8").read())
+        except (OSError, ValueError):
+            monthly = {}
+        entry = monthly.get(f"{start.year}-{start.month:02d}")
+        if entry:
+            for field in ("climateControl", "domesticHotWaterTank"):
+                value = entry.get(field)
+                if isinstance(value, (int, float)):
+                    out[field] = float(value)
+            out["days"] = 1
+            out["source"] = "monthly archive"
+            return out
+        # No monthly figure yet: fall through and sum what days we have,
+        # which is right for a month still in progress.
+
     try:
         store = json.loads(io.open(
             state_path(".daikin-daily.json"), encoding="utf-8").read())
@@ -960,7 +986,7 @@ def report_snapshot(period, shelly_hosts, labels, em_host=None) -> dict:
     with ThreadPoolExecutor(max_workers=6) as pool:
         sigen = pool.submit(report_sigen, start, end, kind)
         zap = pool.submit(report_zappi, start, end)
-        daikin_f = pool.submit(report_daikin, start, end)
+        daikin_f = pool.submit(report_daikin, start, end, kind)
 
         out["sigen"] = sigen.result()
         out["zappi"] = zap.result()
@@ -1022,6 +1048,10 @@ def render_report(rep: dict) -> bytes:
                 f'<tr><td class="label">Heat pump &mdash; hot water</td>'
                 f'<td class="value">{kwh(d.get("domesticHotWaterTank"))} kWh'
                 f'</td></tr>')
+        if d.get("source") != "monthly archive" and rep["kind"] == "month":
+            heat += (f'<tr><td colspan="2" class="muted">summed from '
+                     f'{d.get("days", 0)} archived day(s) &mdash; the month is '
+                     f'not complete in the monthly archive yet</td></tr>')
         if d.get("days", 0) == 0:
             heat += ('<tr><td colspan="2" class="muted">no daily figures '
                      'archived for this period yet</td></tr>')
