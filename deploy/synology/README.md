@@ -110,6 +110,23 @@ The next run of the task picks it up and restarts within five minutes.
   sftp subsystem. Use `scp -O`, or pipe: `cat f | ssh nas 'cat > path/f'`.
 - **`ps` and `pgrep -f` are BusyBox** and will not find processes you know are
   running. Trust `systemctl is-active`, not a pgrep.
+- **A `/proc` walk run inline over SSH can match itself.** `ssh nas '...for p
+  in /proc/*; do ... reconcile.py ...'` puts the whole script into the remote
+  shell's own `cmdline`, so the search finds that shell and a `kill` aimed at
+  the agent terminates your session instead. `repoll.sh` is safe because it is
+  a *file* — its cmdline is `sh repoll.sh` — but an inline one-liner is not.
+  For anything that signals the agent, take the pid from systemd rather than
+  from string matching:
+  ```sh
+  systemctl show oig-sigen -p MainPID | cut -d= -f2
+  ```
+  Note DSM's systemd is old enough to reject `--value`, hence the `cut`.
+- **`systemctl restart` needs root, but SIGTERM does not.** The unit runs as
+  `admin` with `Restart=always`, so the owner can pick up new code with
+  `kill -TERM <MainPID>` and systemd brings it back within `RestartSec`
+  (30s). The agent handles signal 15 properly — it logs `caught signal 15`,
+  runs its release path, and exits — so this is a clean restart, not a kill.
+  Check nothing is held first.
 - **Old DSM needs old crypto** to accept a modern OpenSSH client:
   `ssh -o Ciphers=+aes256-cbc -o HostKeyAlgorithms=+ssh-rsa <user>@<nas>`
   Those options belong in a `~/.ssh/config` block, which pins them to this
