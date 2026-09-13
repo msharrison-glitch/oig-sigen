@@ -56,9 +56,18 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import heatreport
 from config import load_env, ConfigError
 
-# A Shelly on wifi power-save can take a second or two to wake. Short enough
-# that one asleep device cannot stall the page, long enough not to miss it.
-SHELLY_TIMEOUT = 4.0
+# A Shelly with eco_mode on sleeps its wifi hard and takes a full 2 s to
+# answer the first request -- measured on two Plus Plugs from the NAS. Five
+# of those probed in parallel from a slow host pushed past a 4 s budget and
+# reported perfectly healthy plugs as unreachable, so this is deliberately
+# generous. One asleep device still cannot stall the page, because the probes
+# run concurrently and the result is cached.
+SHELLY_TIMEOUT = 8.0
+
+# Eco mode means the FIRST request wakes the radio and may still time out.
+# A single retry costs nothing when the device is awake and is the difference
+# between "unreachable" and a reading when it is not.
+SHELLY_RETRIES = 2
 
 # The cloud call is the only one that leaves the network. A refresh-happy
 # browser must not turn into a poll loop against someone else's API.
@@ -115,8 +124,18 @@ def read_shelly(host: str) -> dict:
 
     def get(path):
         url = f"http://{host}{path}"
-        with urllib.request.urlopen(url, timeout=SHELLY_TIMEOUT) as response:
-            return json.loads(response.read())
+        last = None
+        for attempt in range(SHELLY_RETRIES):
+            try:
+                with urllib.request.urlopen(
+                        url, timeout=SHELLY_TIMEOUT) as response:
+                    return json.loads(response.read())
+            except Exception as exc:              # noqa: BLE001
+                last = exc
+                # The first request is what wakes an eco-mode radio; by the
+                # second it is usually listening. No backoff: the delay is
+                # the device waking, not congestion.
+        raise last
 
     try:
         info = get("/shelly")
