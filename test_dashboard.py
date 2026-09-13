@@ -207,6 +207,46 @@ def main() -> int:
     check("no tariff data at all is empty, not broken",
           dashboard.tariff_block({}), "")
 
+    print("\nPlug history is DIFFERENCED, because a plug only counts upwards")
+    # A Shelly plug exposes a lifetime kWh counter and nothing else -- no
+    # yesterday, no last week. Per-period consumption can only come from the
+    # difference between two recorded readings, which is why record_shellys
+    # has to run on a timer and why an hour unrecorded is unrecoverable.
+    t0 = dt.datetime(2026, 9, 13, 0, 0)
+    hist = [{"_t": t0 + dt.timedelta(hours=h), "host": "h1",
+             "channel": "switch:0", "kwh": 100.0 + h * 0.5}
+            for h in range(5)]
+    use = dashboard.shelly_usage(hist, t0, t0 + dt.timedelta(hours=4))
+    check("consumption is last minus first",
+          round(use[("h1", "switch:0")], 2), 2.0)
+    half = dashboard.shelly_usage(hist, t0, t0 + dt.timedelta(hours=2))
+    check("a shorter window gives less",
+          round(half[("h1", "switch:0")], 2), 1.0)
+    check("a window outside the data yields nothing",
+          dashboard.shelly_usage(hist, t0 - dt.timedelta(days=2),
+                                 t0 - dt.timedelta(days=1)), {})
+    check("a single reading cannot be differenced",
+          dashboard.shelly_usage(hist[:1], t0, t0 + dt.timedelta(hours=4)), {})
+
+    # A counter that goes backwards means the device was reset or swapped.
+    # The honest answer is "unknown" -- not a negative, and definitely not a
+    # huge positive from treating the wrap as real consumption.
+    reset = [{"_t": t0, "host": "h1", "channel": "switch:0", "kwh": 900.0},
+             {"_t": t0 + dt.timedelta(hours=1), "host": "h1",
+              "channel": "switch:0", "kwh": 0.4}]
+    check("a counter reset is dropped, not reported as negative",
+          dashboard.shelly_usage(reset, t0, t0 + dt.timedelta(hours=2)), {})
+
+    check("channels are kept apart",
+          len(dashboard.shelly_usage(hist + [
+              {"_t": t0, "host": "h1", "channel": "switch:1", "kwh": 5.0},
+              {"_t": t0 + dt.timedelta(hours=4), "host": "h1",
+               "channel": "switch:1", "kwh": 9.0}], t0,
+              t0 + dt.timedelta(hours=4))), 2)
+
+    print("\nA missing history file is empty, not an error")
+    check("no file yet", dashboard.load_shelly_history("/nonexistent/x.jsonl"), [])
+
     print("\nFormatting helpers")
     check("None power is a dash, not 0", dashboard.kw(None), "&mdash;")
     check("None watts is a dash", dashboard.watts(None), "&mdash;")

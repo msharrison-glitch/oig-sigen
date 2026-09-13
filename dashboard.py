@@ -54,7 +54,7 @@ from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import heatreport
-from config import load_env, ConfigError
+from config import load_env, ConfigError, state_path
 
 # A Shelly with eco_mode on sleeps its wifi hard and takes a full 2 s to
 # answer the first request -- measured on two Plus Plugs from the NAS. Five
@@ -76,7 +76,14 @@ CACHE_SECONDS = 15.0
 # The page refreshes itself; no JS, so this is the only way.
 PAGE_REFRESH_SECONDS = 30
 
+# The report is expensive (a Zappi call per day) and changes slowly.
+REPORT_CACHE_SECONDS = 600.0
+
 DEFAULT_LOG = "observe.log"
+
+# Lifetime counters, written down so they can be differenced later. Nothing
+# else records the plugs; see record_shellys().
+SHELLY_HISTORY_FILE = ".shelly-history.jsonl"
 
 
 # --------------------------------------------------------------------------
@@ -163,13 +170,26 @@ def read_shelly(host: str) -> dict:
                         "id": key, "kind": "switch",
                         "on": node.get("output"),
                         "watts": node.get("apower"),
-                        "kwh": (node.get("aenergy") or {}).get("total"),
+                        # aenergy.total is WATT-hours on Gen2, so this is a
+                        # division not a rename. Stored raw it made a fridge
+                        # look like it drew 3 kW.
+                        "kwh": ((node.get("aenergy") or {}).get("total") or 0)
+                               / 1000.0,
                     })
                 elif key.startswith("em1:"):
+                    # The matching em1data:N node carries the LIFETIME
+                    # counter, in the same response. That matters: walking
+                    # the device's minute history costs ~46 calls per channel
+                    # per day at 31 records a call, which took 150 s for a
+                    # single day and was hopeless for a month. Differencing
+                    # the counter, exactly as the plugs must be handled,
+                    # turns the whole report into one fast call.
+                    meta = status.get("em1data:" + key.split(":", 1)[1]) or {}
                     out["channels"].append({
                         "id": key, "kind": "meter",
                         "watts": node.get("act_power"),
                         "volts": node.get("voltage"),
+                        "kwh": (meta.get("total_act_energy") or 0) / 1000.0,
                     })
         else:
             status = get("/status")
@@ -212,6 +232,92 @@ def read_agent(log_path: str) -> dict:
             break
     holding = [s for s in out.get("slots", []) if not s.get("end")]
     out["holding"] = bool(holding)
+    return out
+
+
+def record_shellys(shelly_hosts, path=None) -> tuple:
+    """Append one reading per channel, so the plugs get a history at all.
+
+    THE REASON THIS EXISTS: a Shelly plug keeps a lifetime kWh counter and
+    nothing else. There is no yesterday on the device, no last week, no last
+    month -- ask it what it used on Tuesday and it cannot tell you, and never
+    could. The Pro 3EM is the exception; it stores two months at one-minute
+    resolution, which is why it needs none of this.
+
+    So consumption per period has to be reconstructed by DIFFERENCING this
+    counter between two readings, which means somebody has to write the
+    readings down. Nothing else will. Every hour this does not run is an hour
+    that cannot be recovered later, which is the same argument that put the
+    Daikin monthly figures in a file.
+
+    Cheap by construction: one line per channel per run, appended, no
+    rewrite. Run it from cron or DSM Task Scheduler every few minutes.
+    """
+    path = path or str(state_path(SHELLY_HISTORY_FILE))
+    now = datetime.now()
+    written = 0
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        devices = list(pool.map(read_shelly, shelly_hosts))
+    with io.open(path, "a", encoding="utf-8") as handle:
+        for device in devices:
+            if device.get("error"):
+                continue
+            for channel in device["channels"]:
+                # kwh is the lifetime counter; watts is only useful as a
+                # sanity check when reading the file back.
+                if channel.get("kwh") is None:
+                    continue
+                handle.write(json.dumps({
+                    "at": now.isoformat(timespec="seconds"),
+                    "host": device["host"],
+                    "channel": channel["id"],
+                    "kwh": channel["kwh"],
+                    "watts": channel.get("watts"),
+                }, sort_keys=True) + "\n")
+                written += 1
+    return path, written, len(devices)
+
+
+def load_shelly_history(path=None) -> list:
+    path = path or str(state_path(SHELLY_HISTORY_FILE))
+    out = []
+    try:
+        for line in io.open(path, encoding="utf-8"):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+                row["_t"] = datetime.fromisoformat(row["at"])
+                out.append(row)
+            except (ValueError, KeyError):
+                continue
+    except OSError:
+        return []
+    out.sort(key=lambda r: r["_t"])
+    return out
+
+
+def shelly_usage(history, start, end) -> dict:
+    """kWh per channel between two instants, by differencing the counter.
+
+    Returns {(host, channel): kwh}. A counter that goes BACKWARDS means the
+    device was reset or replaced, and the correct answer then is "we do not
+    know", not a negative number or a huge positive one -- so that channel is
+    dropped rather than guessed at.
+    """
+    per = {}
+    for row in history:
+        if start <= row["_t"] <= end:
+            per.setdefault((row["host"], row["channel"]), []).append(row["kwh"])
+    out = {}
+    for key, values in per.items():
+        if len(values) < 2:
+            continue                       # nothing to difference yet
+        delta = values[-1] - values[0]
+        if delta < 0:
+            continue                       # counter reset; unknowable
+        out[key] = delta
     return out
 
 
@@ -560,7 +666,27 @@ class _Cache:
             return self.value
 
 
-def make_handler(shelly_hosts, log_path, cache, labels=None, history=True):
+class _KeyedCache:
+    """One cached value per period. Longer TTL than the live page: a month
+    total does not change minute to minute, and each Zappi day is a call."""
+
+    def __init__(self, seconds):
+        self.seconds = seconds
+        self.entries = {}
+        self.lock = threading.Lock()
+
+    def get(self, key, produce):
+        with self.lock:
+            at, value = self.entries.get(key, (0.0, None))
+            if value is None or (time.time() - at) > self.seconds:
+                value = produce()
+                self.entries[key] = (time.time(), value)
+            return value
+
+
+def make_handler(shelly_hosts, log_path, cache, labels=None, history=True,
+                 em_host=None, report_cache=None):
+    report_cache = report_cache or _KeyedCache(REPORT_CACHE_SECONDS)
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args):
             pass                                   # quiet by default
@@ -573,6 +699,20 @@ def make_handler(shelly_hosts, log_path, cache, labels=None, history=True):
             elif path in ("/", "/index.html"):
                 snap = cache.get(lambda: snapshot(shelly_hosts, log_path, labels, history))
                 body = render(snap)
+                ctype = "text/html; charset=utf-8"
+            elif path == "/report":
+                import urllib.parse as _up
+                query = _up.parse_qs(self.path.partition("?")[2])
+                period = (query.get("period") or ["today"])[0]
+                if period not in dict((p[0], p) for p in PERIODS):
+                    period = "today"
+                # Its own cache: a month total does not change minute to
+                # minute, and the Zappi is a call per day.
+                snap = report_cache.get(
+                    period,
+                    lambda: report_snapshot(period, shelly_hosts, labels,
+                                            em_host))
+                body = render_report(snap)
                 ctype = "text/html; charset=utf-8"
             elif path == "/snapshot.json":
                 snap = cache.get(lambda: snapshot(shelly_hosts, log_path, labels, history))
@@ -619,6 +759,12 @@ def main() -> int:
                         help="JSON of friendly names; the Shelly app keeps "
                              "names in Shelly Cloud, not on the device, so a "
                              "LAN-only dashboard cannot read them")
+    parser.add_argument("--record", action="store_true",
+                        help="append one reading per channel and exit. Put "
+                             "this on a timer: a Shelly plug keeps only a "
+                             "lifetime counter, so per-period consumption "
+                             "has to be differenced, and an hour not "
+                             "recorded cannot be recovered")
     parser.add_argument("--no-history", action="store_true",
                         help="skip the tariff/SOC series (one extra cloud "
                              "call per refresh)")
@@ -626,6 +772,11 @@ def main() -> int:
 
     hosts = shelly_hosts_from(args)
     labels = load_labels(args.labels)
+    if args.record:
+        path, written, seen = record_shellys(hosts)
+        print(f"recorded {written} channel reading(s) from {seen} device(s) "
+              f"-> {path}")
+        return 0
     history = not args.no_history
     if args.once:
         snap = snapshot(hosts, args.log, labels, history)
@@ -637,7 +788,10 @@ def main() -> int:
         return 2
 
     cache = _Cache(CACHE_SECONDS)
-    handler = make_handler(hosts, args.log, cache, labels, history)
+    em_host = next((h for h, e in (labels or {}).items()
+                    if isinstance(e, dict)
+                    and any(k.startswith("em1:") for k in e)), None)
+    handler = make_handler(hosts, args.log, cache, labels, history, em_host)
     server = ThreadingHTTPServer((args.bind, args.port), handler)
     print(f"dashboard on http://{args.bind}:{args.port}  "
           f"({len(hosts)} Shelly host(s), {len(labels)} label(s), "
@@ -648,6 +802,299 @@ def main() -> int:
         print("\nstopped")
     return 0
 
+
+
+
+# --------------------------------------------------------------------------
+# reporting: consumption per period
+# --------------------------------------------------------------------------
+
+# Which periods the page offers, in the order they appear. "kind" decides how
+# the Sigen totals are fetched: dateFlag=1 is a single DAY and returns zeros
+# for a range, dateFlag=2 is a whole MONTH in one call. Asking for a month
+# day-by-day would be 30 calls for a number the API already aggregates.
+PERIODS = (
+    ("today", "Today", "day"),
+    ("yesterday", "Yesterday", "day"),
+    ("last7", "Last 7 days", "days"),
+    ("month", "This month", "month"),
+    ("lastmonth", "Last month", "month"),
+)
+
+
+def period_range(name: str, today=None) -> tuple:
+    """(start date, end date inclusive, label, kind). Defaults to today."""
+    today = today or datetime.now().date()
+    label = dict((p[0], p[1]) for p in PERIODS).get(name, "Today")
+    kind = dict((p[0], p[2]) for p in PERIODS).get(name, "day")
+    if name == "yesterday":
+        day = today - timedelta(days=1)
+        return day, day, label, kind
+    if name == "last7":
+        return today - timedelta(days=6), today, label, kind
+    if name == "month":
+        return today.replace(day=1), today, label, kind
+    if name == "lastmonth":
+        last_day = today.replace(day=1) - timedelta(days=1)
+        return last_day.replace(day=1), last_day, label, kind
+    return today, today, label, kind
+
+
+def report_sigen(start, end, kind) -> dict:
+    """Energy totals for the period. One call for a day or a month."""
+    try:
+        import sigencloud
+        client = sigencloud.client_from_env()
+        client.ensure()
+
+        def fetch(s, e, flag):
+            data = client._call(
+                "GET",
+                f"data-process/sigen/station/statistics/v1/energy/custom"
+                f"?stationId={client.station_id}&startDate={s:%Y%m%d}"
+                f"&endDate={e:%Y%m%d}&dateFlag={flag}"
+                f"&resourceIds=energy_card").get("data") or {}
+            return {c.get("cardKey"): c.get("value")
+                    for c in (data.get("stationCards") or [])}
+
+        if kind == "month":
+            return fetch(start, end, 2)
+        if kind == "day":
+            return fetch(start, end, 1)
+        # A span of days: the API returns zeros for a ranged dateFlag=1, so
+        # sum the days. Seven calls, cached; still far cheaper than walking a
+        # month when dateFlag=2 exists.
+        total = {}
+        day = start
+        while day <= end:
+            for key, value in fetch(day, day, 1).items():
+                if isinstance(value, (int, float)):
+                    total[key] = total.get(key, 0.0) + value
+            day += timedelta(days=1)
+        return total
+    except Exception as exc:                          # noqa: BLE001
+        return {"error": f"{type(exc).__name__}"}
+
+
+def report_zappi(start, end) -> dict:
+    """Car charging for the period, in kWh.
+
+    myenergi reports JOULES PER MINUTE in h1b/h1d/h2b/... where the suffix is
+    b for boost (grid) and d for diverted (surplus solar). Sum only fields
+    that match that shape: `hr` and `min` are the timestamp and summing by
+    prefix silently counted the hour as energy.
+    """
+    try:
+        import zappi as zappi_mod
+        client = zappi_mod.client_from_env()
+
+        days = []
+        day = start
+        while day <= end:
+            days.append(day)
+            day += timedelta(days=1)
+
+        def one(d):
+            """One day's joules. Never raises: a month must not fail on a
+            single bad day, and myenergi returns nothing for a date before
+            the charger was commissioned."""
+            try:
+                raw = client._get(f"/cgi-jday-Z{client.serial}-"
+                                  f"{d.year}-{d.month}-{d.day}")
+                rows = raw[next(iter(raw))] if raw else []
+            except Exception:                          # noqa: BLE001
+                return 0.0, 0.0, False
+            grid = solar = 0.0
+            for row in rows:
+                for key, value in row.items():
+                    # h<phase><b|d>: b is boost (grid), d is diverted solar.
+                    # Matching on the prefix alone counted `hr`, the HOUR.
+                    if len(key) == 3 and key[0] == "h" and key[1].isdigit():
+                        if key[2] == "b":
+                            grid += value
+                        elif key[2] == "d":
+                            solar += value
+            return grid, solar, True
+
+        # A day at a time is how this API works, so a month is 30 round
+        # trips. Sequentially that took long enough to time the page out;
+        # concurrently it is one round trip's worth of waiting.
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(one, days))
+
+        grid = sum(r[0] for r in results)
+        solar = sum(r[1] for r in results)
+        return {"grid": grid / 3600000.0, "solar": solar / 3600000.0,
+                "total": (grid + solar) / 3600000.0,
+                "days": sum(1 for r in results if r[2]),
+                "days_asked": len(days)}
+    except Exception as exc:                          # noqa: BLE001
+        return {"error": f"{type(exc).__name__}"}
+
+
+def report_daikin(start, end) -> dict:
+    """Heat pump kWh, from the archives daikin.py maintains."""
+    out = {"climateControl": 0.0, "domesticHotWaterTank": 0.0, "days": 0}
+    try:
+        store = json.loads(io.open(
+            state_path(".daikin-daily.json"), encoding="utf-8").read())
+    except (OSError, ValueError):
+        return {"error": "no daily archive yet"}
+    day = start
+    while day <= end:
+        entry = store.get(day.isoformat())
+        if entry:
+            out["days"] += 1
+            for kind in ("climateControl", "domesticHotWaterTank"):
+                value = entry.get(kind)
+                if isinstance(value, (int, float)):
+                    out[kind] += value
+        day += timedelta(days=1)
+    return out
+
+
+def report_snapshot(period, shelly_hosts, labels, em_host=None) -> dict:
+    start, end, label, kind = period_range(period)
+    out = {"period": period, "label": label, "start": start, "end": end,
+           "kind": kind, "labels": labels or {}}
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        sigen = pool.submit(report_sigen, start, end, kind)
+        zap = pool.submit(report_zappi, start, end)
+        daikin_f = pool.submit(report_daikin, start, end)
+
+        out["sigen"] = sigen.result()
+        out["zappi"] = zap.result()
+        out["daikin"] = daikin_f.result()
+        out["em"] = {}
+    history = load_shelly_history()
+    begin = datetime.combine(start, datetime.min.time())
+    finish = datetime.combine(end + timedelta(days=1), datetime.min.time())
+    out["plugs"] = shelly_usage(history, begin, finish)
+    out["recording_since"] = history[0]["_t"] if history else None
+    return out
+
+
+def kwh(value, dp=2):
+    if value is None:
+        return "&mdash;"
+    return f"{value:.{dp}f}"
+
+
+def render_report(rep: dict) -> bytes:
+    tabs = " ".join(
+        f'<a class="{"on" if key == rep["period"] else ""}" '
+        f'href="/report?period={key}">{escape(name)}</a>'
+        for key, name, _kind in PERIODS)
+
+    s = rep["sigen"]
+    if s.get("error"):
+        sigen_rows = (f'<tr><td colspan="2" class="muted">unavailable '
+                      f'&mdash; {escape(s["error"])}</td></tr>')
+    else:
+        sigen_rows = "".join(
+            f'<tr><td class="label">{escape(title)}</td>'
+            f'<td class="value">{kwh(s.get(key))} kWh</td></tr>'
+            for key, title in (("FROM_SOLAR", "Solar generated"),
+                               ("TO_LOAD", "House consumed"),
+                               ("FROM_GRID", "Imported"),
+                               ("TO_GRID", "Exported"),
+                               ("TO_BATTERY", "Into battery"),
+                               ("FROM_BATTERY", "Out of battery"))
+            if s.get(key) is not None)
+
+    z = rep["zappi"]
+    if z.get("error"):
+        zap = (f'<tr><td class="label">Car (Zappi)</td>'
+               f'<td class="value muted">{escape(z["error"])}</td></tr>')
+    else:
+        zap = (f'<tr><td class="label">Car (Zappi)<br>'
+               f'<span class="note">{kwh(z.get("grid"))} from grid, '
+               f'{kwh(z.get("solar"))} diverted solar</span></td>'
+               f'<td class="value">{kwh(z.get("total"))} kWh</td></tr>')
+
+    d = rep["daikin"]
+    if d.get("error"):
+        heat = (f'<tr><td class="label">Heat pump</td>'
+                f'<td class="value muted">{escape(d["error"])}</td></tr>')
+    else:
+        heat = (f'<tr><td class="label">Heat pump &mdash; space heating</td>'
+                f'<td class="value">{kwh(d.get("climateControl"))} kWh</td></tr>'
+                f'<tr><td class="label">Heat pump &mdash; hot water</td>'
+                f'<td class="value">{kwh(d.get("domesticHotWaterTank"))} kWh'
+                f'</td></tr>')
+        if d.get("days", 0) == 0:
+            heat += ('<tr><td colspan="2" class="muted">no daily figures '
+                     'archived for this period yet</td></tr>')
+
+    circuits = []
+    for channel, value in sorted(rep.get("em", {}).items()):
+        name = channel
+        for host, entry in (rep["labels"] or {}).items():
+            if isinstance(entry, dict) and channel in entry:
+                name = entry[channel]
+        circuits.append(f'<tr><td class="label">{escape(name)}</td>'
+                        f'<td class="value">{kwh(value)} kWh</td></tr>')
+    for (host, channel), value in sorted(rep.get("plugs", {}).items()):
+        entry = (rep["labels"] or {}).get(host)
+        name = entry if isinstance(entry, str) else (
+            entry.get(channel, f"{host} {channel}")
+            if isinstance(entry, dict) else f"{host} {channel}")
+        circuits.append(f'<tr><td class="label">{escape(str(name))}</td>'
+                        f'<td class="value">{kwh(value)} kWh</td></tr>')
+    since = rep.get("recording_since")
+    if not rep.get("plugs"):
+        note = ("plug history starts when the recorder does"
+                if not since else
+                f"recording since {since:%d %b %H:%M}; not enough yet "
+                f"for this period")
+        circuits.append(f'<tr><td colspan="2" class="muted">{escape(note)}'
+                        f'</td></tr>')
+
+    return f"""<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Energy &middot; {escape(rep['label'])}</title>
+<style>
+:root {{ color-scheme: light dark; --line:#8883; --muted:#8886; }}
+body {{ font:15px/1.5 -apple-system, system-ui, sans-serif; margin:0;
+        padding:1.2rem; max-width:780px; }}
+h1 {{ font-size:1.1rem; margin:0 0 .1rem; font-weight:600; }}
+h2 {{ font-size:.78rem; text-transform:uppercase; letter-spacing:.09em;
+      margin:1.6rem 0 .4rem; color:var(--muted); font-weight:600; }}
+nav {{ margin:.9rem 0 .2rem; display:flex; flex-wrap:wrap; gap:.4rem; }}
+nav a {{ padding:.28rem .7rem; border:1px solid var(--line); border-radius:5px;
+         text-decoration:none; color:inherit; font-size:.9rem; }}
+nav a.on {{ background:#4a9; color:#fff; border-color:#4a9; font-weight:600; }}
+table {{ border-collapse:collapse; width:100%; }}
+td {{ padding:.34rem 0; border-bottom:1px solid var(--line); }}
+.label {{ width:62%; }}
+.value {{ text-align:right; font-variant-numeric:tabular-nums;
+          font-weight:600; }}
+.note, .muted {{ color:var(--muted); font-size:.88rem; font-weight:400; }}
+footer {{ margin-top:2rem; color:var(--muted); font-size:.82rem; }}
+</style></head><body>
+<h1>Energy report &mdash; {escape(rep['label'])}</h1>
+<p class="muted">{rep['start']:%a %d %b} &ndash; {rep['end']:%a %d %b} &middot;
+<a href="/" style="color:inherit">live view</a></p>
+<nav>{tabs}</nav>
+
+<h2>Plant</h2>
+<table>{sigen_rows}</table>
+
+<h2>Devices</h2>
+<table>{zap}{heat}</table>
+
+<h2>Circuits</h2>
+<table>{"".join(circuits)}</table>
+
+<footer>
+Plant totals come from the Sigen cloud &mdash; one call for a day or a whole
+month. Circuits metered by the Pro 3EM come from the device's own two months
+of minute data. The plugs keep only a lifetime counter, so their figures are
+differenced from recorded readings and only cover the period since recording
+began. Heat pump figures come from the daily buckets Daikin keeps for a
+rolling fortnight, archived locally so they outlive it.
+</footer>
+</body></html>""".encode("utf-8")
 
 if __name__ == "__main__":
     raise SystemExit(main())
