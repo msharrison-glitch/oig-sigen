@@ -265,6 +265,45 @@ def main() -> int:
     check("and the lease is reported separately, not conflated",
           sent.get("lease_held"), False)
 
+    print("\nThe watchdog address comes from .env, not only the command line")
+    # It is deployment config, and putting it only on the command line means
+    # editing a systemd unit as root -- which the owner running the agent
+    # usually is not. That friction is why a plant ran for weeks with no
+    # off-box watching at all.
+    import config
+    env_file = _TMP / "watchdog-env-test"
+    env_file.write_text("IOG_HEARTBEAT_URL = https://hc-ping.com/abc \n"
+                        "IOG_SITE_TOKEN=\n", encoding="utf-8")
+    real_load = config.load_env
+    config.load_env = lambda *a, **k: {"IOG_HEARTBEAT_URL":
+                                       "  https://hc-ping.com/abc  ",
+                                       "IOG_SITE_TOKEN": "  ",
+                                       "IOG_EMPTY": ""}
+    try:
+        check("a URL is read and stripped",
+              config.env_setting("IOG_HEARTBEAT_URL"), "https://hc-ping.com/abc")
+        check("whitespace-only is None, not a truthy blank",
+              config.env_setting("IOG_SITE_TOKEN"), None)
+        check("empty is None", config.env_setting("IOG_EMPTY"), None)
+        check("an absent key is None", config.env_setting("IOG_NOT_SET"), None)
+        config.load_env = lambda *a, **k: (_ for _ in ()).throw(
+            config.ConfigError("no .env here"))
+        check("no .env at all is None, not a crash",
+              config.env_setting("IOG_HEARTBEAT_URL"), None)
+    finally:
+        config.load_env = real_load
+        env_file.unlink(missing_ok=True)
+    # send_heartbeat needs BOTH truthy or it silently no-ops, so a URL with no
+    # token must not look like a configured watchdog that never reports.
+    check("a URL without a token would otherwise disable the heartbeat",
+          reconcile.Reconciler(
+              client_for(make_plant()), FakeOctopus([]), 5.0, 95.0,
+              heartbeat_url="https://hc-ping.com/abc",
+              site_token=None).send_heartbeat(
+                  reconcile.PlantState(enable=0, mode=0, soc=50.0,
+                                       charge_limit_kw=None), "idle"),
+          False)
+
     print("\nThe watchdog must never be able to harm the controller")
     rec_bad = reconcile.Reconciler(
         client_for(plant), FakeOctopus([]), 5.0, 95.0,

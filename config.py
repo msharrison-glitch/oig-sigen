@@ -33,6 +33,7 @@ ENV_KEYS = ("OCTOPUS_API_KEY", "OCTOPUS_ACCOUNT_NUMBER", "SIGEN_HOST",
             "IOG_POLL_IDLE_SECONDS", "IOG_POLL_CHARGING_SECONDS",
             "IOG_RESUME_BAND_PCT", "IOG_RESTORE_MODE",
             "IOG_RESTORE_PROFILE", "IOG_STATE_DIR",
+            "IOG_HEARTBEAT_URL", "IOG_SITE_TOKEN",
             "MYENERGI_SERIAL", "MYENERGI_API_KEY", "MYENERGI_USER_AGENT",
             "SIGEN_CLOUD_USERNAME", "SIGEN_CLOUD_PASSWORD",
             "SIGEN_CLOUD_REGION",
@@ -107,6 +108,20 @@ def poll_seconds(key: str, default: float) -> float:
               f"waiting on actuation latency, not detection.")
         return MIN_POLL_SECONDS
     return value
+
+
+def env_setting(key: str) -> str | None:
+    """A plain string setting from .env, or None if unset or unreadable.
+
+    Deliberately quiet: a missing .env is not an error for an optional
+    setting, and an agent that refused to start because nobody had configured
+    a watchdog would be trading a real capability for a hypothetical one.
+    """
+    try:
+        value = (load_env().get(key) or "").strip()
+    except ConfigError:
+        return None
+    return value or None
 
 
 def resolve_host(explicit: str | None) -> str:

@@ -71,8 +71,8 @@ from datetime import datetime, timedelta, timezone
 
 import control
 import registers as R
-from config import (ConfigError, load_env, poll_seconds, resolve_host,
-                    state_path)
+from config import (ConfigError, env_setting, load_env, poll_seconds,
+                    resolve_host, state_path)
 from octopus import (LOCAL_TZ, OctopusClient, OctopusError, Slot,
                      merge, off_peak_windows)
 from sigen import ModbusError, SigenClient
@@ -1558,12 +1558,29 @@ def main() -> int:
         log.error("configuration: %s", exc)
         return 1
 
+    # The watchdog address is DEPLOYMENT config, not a per-run choice, so it
+    # belongs beside the other IOG_* settings in .env. Putting it only on the
+    # command line means editing the systemd unit, which needs root -- and the
+    # owner who runs the agent usually is not root. That friction is why this
+    # plant ran for weeks with no off-box watching at all. A flag still wins,
+    # for a one-off run against a different watchdog.
+    heartbeat_url = args.heartbeat_url or env_setting("IOG_HEARTBEAT_URL")
+    site_token = args.site_token or env_setting("IOG_SITE_TOKEN")
+    if heartbeat_url and not site_token:
+        # send_heartbeat needs both truthy or it silently does nothing, which
+        # would look exactly like a configured watchdog that never hears from
+        # us. Some services (hc-ping and friends) authenticate by URL alone.
+        site_token = "unused"
+        log.info("no IOG_SITE_TOKEN set; sending an inert bearer token")
+    if heartbeat_url:
+        log.info("heartbeat -> %s", heartbeat_url)
+
     try:
         with SigenClient(host, port=args.port) as client:
             rec = Reconciler(client, octopus, args.kw, args.target_soc,
                              dry_run=args.dry_run,
-                             heartbeat_url=args.heartbeat_url,
-                             site_token=args.site_token,
+                             heartbeat_url=heartbeat_url,
+                             site_token=site_token,
                              bonus_only=args.bonus_only,
                              zappi=zappi_client, cloud=cloud_client,
                              charge_profile_id=profile_id)
