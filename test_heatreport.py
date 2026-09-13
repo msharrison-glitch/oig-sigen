@@ -87,6 +87,44 @@ def main() -> int:
     check("a DECLINED dispatch is not a slot",
           any(s["start"].day == 7 for s in slots), False)
 
+    print("\nSchedule churn must NOT end a slot")
+    # Octopus re-plans constantly: it withdraws a dispatch and adds a new one
+    # covering the same time, in the same tick, while the agent charges
+    # straight through. Matching the word WITHDRAWN anywhere in a line treated
+    # that as the end of the slot. Observed 2026-09-13, and across a fortnight
+    # of real log it hid 277 of 612 commanded minutes -- 45% of the only
+    # number the ASHP proposal actually rests on.
+    churn = """\
+2026-09-13 20:12:51 INFO    SOC 11.1% -> STARTED charging
+2026-09-13 20:30:23 INFO    SCHEDULE + added   20:30 -> 23:30 [dispatch]
+2026-09-13 20:30:23 WARNING SCHEDULE - WITHDRAWN 20:09 -> 23:30 [dispatch] -- +21.4 min into it
+2026-09-13 20:30:30 INFO    SOC 24.4% -> holding
+2026-09-13 23:29:40 INFO    SOC 95.0% -> RELEASED
+""".splitlines()
+    churned = heatreport.parse_slots(churn)
+    check("churn leaves exactly one slot", len(churned), 1)
+    check("and it ends at the RELEASE, not the withdrawal",
+          churned[0]["end"], dt.datetime(2026, 9, 13, 23, 29, 40))
+    check("so its length is the real one",
+          round((churned[0]["end"] - churned[0]["start"]).total_seconds() / 60),
+          197)
+
+    print("\nThe other ways a slot really can end")
+    for action, label in (("RELEASED", "a normal release"),
+                          ("STOOD DOWN (plant taken back)", "a stand-down"),
+                          ("RESTORE FAILED", "a failed restore")):
+        log = [f"2026-09-13 20:00:00 INFO    SOC 10.0% -> STARTED charging",
+               f"2026-09-13 20:30:00 INFO    SOC 30.0% -> {action}"]
+        got = heatreport.parse_slots(log)
+        check(f"{label} closes the slot",
+              (len(got), got[0].get("end")),
+              (1, dt.datetime(2026, 9, 13, 20, 30)))
+    # "holding" is the steady state, not an ending.
+    held = heatreport.parse_slots([
+        "2026-09-13 20:00:00 INFO    SOC 10.0% -> STARTED charging",
+        "2026-09-13 20:05:00 INFO    SOC 12.0% -> holding"])
+    check("but 'holding' leaves it open", held[0].get("end"), None)
+
     print("\nA slot still open at the end of the log")
     open_log = LOG.splitlines()[:3]
     still = heatreport.parse_slots(open_log)

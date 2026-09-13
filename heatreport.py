@@ -44,6 +44,21 @@ DEFAULT_LOG = "observe.log"
 LOG_LINE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s+\w+\s+(.*)$")
 SOC = re.compile(r"SOC\s+([\d.]+)%")
 
+# The agent's ACTION for a tick, which is whatever follows the last "-> ".
+# Matching on the action rather than on words anywhere in the line matters:
+# see the note on ACTIONS_END below.
+ACTION = re.compile(r"->\s+(.+?)\s*$")
+
+# Everything reconcile.py can return that means "we are no longer commanding
+# this slot". `WITHDRAWN` is deliberately NOT here, and that is the whole
+# point: it is never an action. It appears only in "SCHEDULE - WITHDRAWN"
+# lines, which record Octopus CHURNING ITS SCHEDULE while we carry on
+# charging. Treating that word as an ending truncated live slots -- observed
+# 2026-09-13, when Octopus withdrew 20:09->23:30 and added 20:30->23:30 in the
+# same tick and the agent never paused, yet the slot was recorded as ending.
+ACTIONS_END = ("RELEASED", "STOOD DOWN", "RESTORE FAILED")
+ACTION_START = "STARTED charging"
+
 
 def parse_time(text: str):
     """Naive local datetime from either file's format."""
@@ -77,9 +92,12 @@ def parse_slots(lines) -> list:
         soc = SOC.search(rest)
         soc = float(soc.group(1)) if soc else None
 
-        if "STARTED charging" in rest:
+        found = ACTION.search(rest)
+        action = found.group(1) if found else ""
+
+        if action == ACTION_START:
             open_slot = {"start": when, "soc_start": soc}
-        elif ("RELEASED" in rest or "WITHDRAWN" in rest) and open_slot:
+        elif open_slot and action.startswith(ACTIONS_END):
             open_slot["end"] = when
             open_slot["soc_end"] = soc
             slots.append(open_slot)
