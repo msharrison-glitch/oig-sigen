@@ -921,12 +921,18 @@ nav a.on {{ background:var(--cheap); color:#04231a; border-color:var(--cheap);
 .spark {{ width:100%; height:40px; display:block; }}
 .sline {{ position:relative; }}
 .band {{ position:absolute; top:0; bottom:0; cursor:crosshair; }}
-.band b {{ position:absolute; bottom:calc(100% + 4px); white-space:nowrap;
-  background:var(--text); color:var(--bg); font-size:.72rem; font-weight:650;
-  padding:.15rem .4rem; border-radius:4px; opacity:0; pointer-events:none;
-  transition:opacity .08s; font-variant-numeric:tabular-nums; z-index:5; }}
+.band b {{ position:absolute; bottom:calc(100% + 5px); white-space:nowrap;
+  background:var(--text); color:var(--bg); font-size:.8rem; font-weight:700;
+  padding:.22rem .5rem; border-radius:5px; opacity:0; pointer-events:none;
+  font-variant-numeric:tabular-nums; z-index:5; letter-spacing:.01em;
+  box-shadow:0 2px 8px #0007; }}
 .band:hover b {{ opacity:1; }}
-.band:hover {{ background:currentColor; opacity:.14; }}
+/* The tint goes on a pseudo-element, NOT on .band. opacity applies to
+   descendants, so tinting the band directly rendered its own label at 14%
+   -- visible, unreadable, and easy to mistake for a styling preference. */
+.band::before {{ content:""; position:absolute; inset:0;
+  background:currentColor; opacity:0; }}
+.band:hover::before {{ opacity:.16; }}
 .g-peak {{ color:var(--peak); }} .g-cheap {{ color:var(--cheap); }}
 .g-batt {{ color:var(--batt); }}
 
