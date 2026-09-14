@@ -372,28 +372,37 @@ def main() -> int:
     check("an unparseable label does not crash it",
           dashboard.value_now([("not a time", 0.2)]), 0.2)
 
-    print("\nSparklines are hoverable, natively, with no JavaScript")
+    print("\nSparklines are hoverable with CSS, not SVG titles or script")
+    # Shipped once using SVG <title>, which SAFARI DOES NOT RENDER -- the
+    # result was a crosshair cursor and no value, on the browser the owner
+    # had moved to because Chrome could not reach the LAN. CSS :hover works
+    # everywhere and still needs nothing loaded.
     _day = dt.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    _series = [( (_day + dt.timedelta(minutes=5 * i)).strftime("%Y%m%d %H:%M"),
-                 0.0449 if (_day + dt.timedelta(minutes=5 * i)).time()
-                 >= dt.time(23, 30) or (_day + dt.timedelta(minutes=5 * i)).time()
-                 < dt.time(5, 30) else 0.29757)
-               for i in range(288)]
-    hoverable = dashboard.sparkline(_series, fill=True,
-                                    fmt=lambda v: f"{v * 100:.2f}p")
-    titles = re.findall(r"<title>([^<]*)</title>", hoverable)
+    _series = []
+    for i in range(288):
+        w = _day + dt.timedelta(minutes=5 * i)
+        cheap = w.time() >= dt.time(23, 30) or w.time() < dt.time(5, 30)
+        _series.append((w.strftime("%Y%m%d %H:%M"), 0.0449 if cheap else 0.29757))
+
+    bands = dashboard.hover_bands(_series, lambda v: f"{v * 100:.2f}p")
+    labels = re.findall(r"<b[^>]*>([^<]*)</b>", bands)
     check("288 five-minute points become 48 half-hour bands",
-          len(titles), 48)
-    check("a band is labelled with its clock time and value",
-          titles[0].strip(), "00:00  4.49p")
-    check("midday reads the peak rate", "29.76p" in titles[24], True)
-    check("and 23:30 picks up the guaranteed window",
-          "4.49p" in titles[47], True)
-    # SVG <title> is a browser-native tooltip: the whole point is that this
-    # needs nothing loaded, so the page still works over an SSH tunnel.
-    check("no script is involved", "<script" in hoverable, False)
-    check("and without a formatter there are no bands at all",
-          dashboard.sparkline(_series).count("<title>"), 0)
+          len(labels), 48)
+    check("a band carries its clock time and value",
+          labels[0].replace("&middot;", "·").strip(), "00:00 · 4.49p")
+    check("midday reads the peak rate", "29.76p" in labels[24], True)
+    check("23:30 picks up the guaranteed window", "4.49p" in labels[47], True)
+    check("no SVG <title> is relied on", "<title>" in bands, False)
+    check("and no script", "<script" in bands, False)
+
+    # The last band must not run off the edge of the card.
+    check("bands near the right edge anchor right",
+          "right:0" in bands, True)
+    check("and near the left edge anchor left", "left:0" in bands, True)
+    check("no points means no bands, not a crash",
+          dashboard.hover_bands([], lambda v: str(v)), "")
+    check("no formatter means no bands",
+          dashboard.hover_bands(_series, None), "")
 
     print("\nThe tariff block answers 'was it cheap when we charged?'")
     # Time-relative, not hard-coded: value_now compares against the clock, so

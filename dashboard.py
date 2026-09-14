@@ -572,6 +572,42 @@ def value_now(points):
     return best if best is not None else points[0][1]
 
 
+def hover_bands(points, fmt) -> str:
+    """Half-hour hover targets laid over a sparkline, revealed by CSS.
+
+    NOT SVG <title>: Safari does not render those as tooltips, which is how
+    this shipped once already showing a crosshair and nothing else. NOT
+    JavaScript either -- the page must work over an SSH tunnel on a host with
+    nothing installed. Plain :hover needs neither.
+
+    The label lives in HTML rather than inside the <svg>, because the
+    sparkline uses preserveAspectRatio="none" and anything drawn inside it
+    gets stretched with the graph.
+    """
+    if not points or not fmt:
+        return ""
+    per_band = max(1, len(points) // 48)
+    out = []
+    total = len(points)
+    for begin in range(0, total, per_band):
+        chunk = [pt for pt in points[begin:begin + per_band]
+                 if pt[1] is not None]
+        if not chunk:
+            continue
+        label = chunk[0][0]
+        clock = label[-5:] if isinstance(label, str) else ""
+        left = 100.0 * begin / total
+        width = 100.0 * min(per_band, total - begin) / total
+        # Nudge the label inward at the edges so it cannot overflow the card.
+        side = "left:0" if left < 12 else ("right:0" if left > 82
+                                           else f"left:{left:.2f}%")
+        out.append(
+            f'<i class="band" style="left:{left:.2f}%;width:{width:.2f}%">'
+            f'<b style="{side}">{escape(clock)} &middot; '
+            f'{escape(fmt(chunk[-1][1]))}</b></i>')
+    return "".join(out)
+
+
 def sparkline(points, width=320, height=48, fill=False,
               zero_base=True, fmt=None) -> str:
     """An inline SVG line. No library, no CDN, no build step.
@@ -599,34 +635,11 @@ def sparkline(points, width=320, height=48, fill=False,
     if fill and coords:
         area = (f'<polygon points="0,{height} {path} {width},{height}" '
                 f'fill="currentColor" opacity="0.14"/>')
-    # Hoverable bands, one per half hour, each carrying an SVG <title> --
-    # a NATIVE browser tooltip. No JavaScript, no library, nothing to load,
-    # so the page still works over an SSH tunnel with nothing installed.
-    #
-    # Half hours rather than the underlying five-minute points because that
-    # is the settlement period, the granularity the tariff actually changes
-    # at, and 48 bands instead of 288.
-    bands = ""
-    if fmt:
-        per_band = max(1, len(points) // 48)
-        for begin in range(0, len(points), per_band):
-            chunk = [pt for pt in points[begin:begin + per_band]
-                     if pt[1] is not None]
-            if not chunk:
-                continue
-            label = chunk[0][0]
-            clock = label[-5:] if isinstance(label, str) else ""
-            bands += (
-                f'<rect x="{begin * step:.1f}" y="0" '
-                f'width="{max(step * per_band, 1.0):.1f}" height="{height}" '
-                f'fill="transparent"><title>{escape(clock)}  '
-                f'{escape(fmt(chunk[-1][1]))}</title></rect>')
-
     return (f'<svg class="spark" viewBox="0 0 {width} {height}" '
             f'preserveAspectRatio="none" role="img">'
             f'{area}<polyline points="{path}" fill="none" '
             f'stroke="currentColor" stroke-width="1.7" '
-            f'vector-effect="non-scaling-stroke"/>{bands}</svg>')
+            f'vector-effect="non-scaling-stroke"/></svg>')
 
 
 def tariff_block(tariff: dict) -> str:
@@ -664,7 +677,7 @@ def tariff_block(tariff: dict) -> str:
             f'<div class="sparkrow">'
             f'<div class="sname">{escape(title)}'
             f'<span class="srange">{lo} &ndash; {hi}</span></div>'
-            f'<div class="sline g-{tone}">{sparkline(points, fill=True, fmt=fmt)}</div>'
+            f'<div class="sline g-{tone}">{sparkline(points, fill=True)}{hover_bands(points, fmt)}</div>'
             f'<div class="snow">{now}</div>'
             f'</div>')
     if not rows:
@@ -906,7 +919,14 @@ nav a.on {{ background:var(--cheap); color:#04231a; border-color:var(--cheap);
 .snow {{ text-align:right; font-weight:640; font-size:.88rem;
   font-variant-numeric:tabular-nums; }}
 .spark {{ width:100%; height:40px; display:block; }}
-.spark rect {{ cursor:crosshair; }}
+.sline {{ position:relative; }}
+.band {{ position:absolute; top:0; bottom:0; cursor:crosshair; }}
+.band b {{ position:absolute; bottom:calc(100% + 4px); white-space:nowrap;
+  background:var(--text); color:var(--bg); font-size:.72rem; font-weight:650;
+  padding:.15rem .4rem; border-radius:4px; opacity:0; pointer-events:none;
+  transition:opacity .08s; font-variant-numeric:tabular-nums; z-index:5; }}
+.band:hover b {{ opacity:1; }}
+.band:hover {{ background:currentColor; opacity:.14; }}
 .g-peak {{ color:var(--peak); }} .g-cheap {{ color:var(--cheap); }}
 .g-batt {{ color:var(--batt); }}
 
