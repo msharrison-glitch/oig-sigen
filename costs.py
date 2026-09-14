@@ -292,7 +292,12 @@ def summarise(imported, exported, rates, windows, off_p, peak_p) -> dict:
         # less and at different times. Useful as an order of magnitude for
         # "what is the cheap window worth", not as a savings claim.
         "vs_all_peak": cheap_kwh * (peak_p - off_p) / 100.0,
-        "half_hours": len(imported),
+        # Import and export settle SEPARATELY. Counting only import made the
+        # page report "0% settled" beside a real export figure, because today
+        # had export rows and no import rows yet.
+        "half_hours": max(len(imported), len(exported)),
+        "import_half_hours": len(imported),
+        "export_half_hours": len(exported),
     }
 
 

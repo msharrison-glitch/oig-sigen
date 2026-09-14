@@ -280,12 +280,37 @@ def main() -> int:
     check("a positive net renders as a cost",
           "net cost" in dashboard.money_block(bad, 96), True)
 
-    print("\nPartial settlement is stated, not silently presented as whole")
-    thin = dict(good, half_hours=12)
-    check("a third of a day says so",
-          "settled" in dashboard.money_block(thin, 96), True)
+    print("\nSettlement has three regimes, because a number too early misleads")
+    # The owner read "+GBP 0.68" against 40 kWh of plant-measured export and
+    # concluded revenue was low. It was not low, it was 10% settled. Below a
+    # quarter, the headline is suppressed rather than invited into a
+    # comparison it cannot survive.
+    barely = dict(good, half_hours=9)
+    early = dashboard.money_block(barely, 96)
+    check("under a quarter settled shows no headline figure",
+          "Settling" in early, True)
+    check("and says how little has arrived", "9%" in early, True)
+    check("but still shows what HAS settled, labelled 'so far'",
+          "Exported so far" in early, True)
+    check("and points at the plant figures instead",
+          "Plant figures below" in early, True)
+
+    partial = dict(good, half_hours=60)
+    mid = dashboard.money_block(partial, 96)
+    check("most of the way, the figure shows with a badge",
+          "settled" in mid and "Settling" not in mid, True)
     check("a complete period does not nag",
           "settled" in dashboard.money_block(good, 96), False)
+
+    print("\nSettlement is counted across BOTH series, not import alone")
+    # Today had export rows and no import rows, so counting import alone
+    # printed "0% settled" beside a real export figure.
+    import costs as _c
+    out = _c.summarise({}, {dt.datetime.now(): 3.93}, {}, [], 4.49, 29.757)
+    check("export-only data is not reported as zero coverage",
+          out["half_hours"], 1)
+    check("and the two series are countable separately",
+          (out["import_half_hours"], out["export_half_hours"]), (0, 1))
 
     print("\nThe counterfactual is labelled as one")
     check("upper bound is stated", "upper bound" in block_html, True)

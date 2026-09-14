@@ -1319,6 +1319,30 @@ def money_block(c: dict, expected_half_hours: int) -> str:
         return (f'<p class="empty">Costs unavailable &mdash; '
                 f'{escape(c["error"])}</p>')
     got = c.get("half_hours") or 0
+    pct_settled = (100.0 * got / expected_half_hours
+                   if expected_half_hours else 0.0)
+
+    # Below this, the figures cover so little of the period that showing them
+    # as a headline invites a comparison they cannot survive -- the owner
+    # reasonably read "+GBP 0.68" against 40 kWh of plant-measured export and
+    # concluded revenue was low, when in fact a tenth of the day had settled.
+    if pct_settled < 25:
+        rows = "".join(
+            f'<div class="mrow"><div class="label">{name}</div>'
+            f'<div class="value">{kwh}</div>'
+            f'<div class="value">{amount}</div></div>'
+            for name, kwh, amount in (
+                ("Imported so far", f"{c['import_kwh']:.2f} kWh",
+                 f"&minus;&pound;{c['import_cost']:.2f}"),
+                ("Exported so far", f"{c['export_kwh']:.2f} kWh",
+                 f"+&pound;{c['export_income']:.2f}")))
+        return (f'<div class="money"><div class="mbig settling">Settling'
+                f'</div><div class="cap">only {pct_settled:.0f}% of this '
+                f'period has reached the meter yet</div></div>{rows}'
+                f'<p class="empty">Octopus publishes meter readings about a '
+                f'day late. Totals here will keep rising; compare the Plant '
+                f'figures below for what actually happened.</p>')
+
     note = ""
     settled = ""
     if got < expected_half_hours * 0.9:
@@ -1464,6 +1488,7 @@ table {{ border-collapse:collapse; width:100%; }}
 td {{ padding:.34rem 0; border-bottom:1px solid var(--line); }}
 .label {{ width:62%; }}
 .money {{ margin:.2rem 0 .9rem; }}
+.mbig.settling {{ color:var(--muted); font-size:1.5rem; }}
 .settled {{ font-size:.72rem; font-weight:600; color:var(--muted);
   margin-left:.55rem; vertical-align:middle; }}
 .mbig {{ font-size:2rem; font-weight:680; letter-spacing:-.02em;
