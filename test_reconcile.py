@@ -1155,6 +1155,39 @@ def main() -> int:
     check("no bogus '+N min into it' for a slot that already finished",
           any("into it" in m for m in infos), False)
 
+    print("\nThe agent publishes its tick so nothing else needs Modbus")
+    import json as _json, tempfile as _tf, pathlib as _pl
+    _dir = _pl.Path(_tf.mkdtemp())
+    _state = _dir / "agent-state.json"
+    plant = make_plant(soc_pct=42.0)
+    rec = reconcile.Reconciler(client_for(plant), FakeOctopus([]), 5.0, 95.0)
+    real = reconcile.state_path
+    reconcile.state_path = lambda name: _state
+    try:
+        action = rec.tick()
+        published = _json.loads(_state.read_text())
+    finally:
+        reconcile.state_path = real
+    check("a tick writes the state file", _state.exists(), True)
+    check("with the SOC it just read", published.get("soc"), 42.0)
+    check("and the action it took", published.get("action"), action)
+    check("and what it is holding, from the agent not inferred",
+          (published.get("cloud_held"), published.get("lease_held")),
+          (False, False))
+    check("no .tmp left behind -- the write is atomic",
+          list(_dir.glob("*.tmp")), [])
+
+    # A monitoring aid must never be able to break what it monitors.
+    reconcile.state_path = real
+    bad = reconcile.Reconciler(client_for(make_plant()), FakeOctopus([]), 5.0, 95.0)
+    real2 = reconcile.state_path
+    reconcile.state_path = lambda name: _pl.Path("/nonexistent/dir/x.json")
+    try:
+        check("an unwritable state file does not break the tick",
+              bad.tick(), "idle")
+    finally:
+        reconcile.state_path = real2
+
     print("\n" + "=" * 72)
     if failures:
         print(f"{len(failures)} FAILED:")

@@ -211,8 +211,37 @@ def read_shelly(host: str) -> dict:
     return out
 
 
-def read_agent(log_path: str) -> dict:
-    """What the agent last saw and did. Parses, never polls."""
+AGENT_STATE_FILE = ".agent-state.json"
+
+
+def read_agent_state(path=None) -> dict:
+    """This tick's plant reading, published by the agent itself.
+
+    Fresher and structured, where the log gives a formatted line up to five
+    minutes old. Still not a Modbus connection: the agent writes what it
+    already read, so this costs no extra traffic on a link that mandates
+    >=1s between requests and is shared with the thing commanding the
+    battery.
+    """
+    try:
+        raw = json.loads(io.open(path or str(state_path(AGENT_STATE_FILE)),
+                                 encoding="utf-8").read())
+    except (OSError, ValueError):
+        return {}
+    try:
+        raw["_t"] = datetime.fromisoformat(raw["local"])
+    except (KeyError, ValueError):
+        return {}
+    return raw
+
+
+def read_agent(log_path: str, state_file=None) -> dict:
+    """What the agent last saw and did. Parses, never polls.
+
+    Slot history comes from the log because only the log has history. The
+    CURRENT reading prefers the state file and falls back to the log line,
+    so a dashboard pointed at an agent too old to publish one still works.
+    """
     out = {"log": log_path}
     try:
         lines = io.open(log_path, encoding="utf-8", errors="replace").readlines()
@@ -232,6 +261,20 @@ def read_agent(log_path: str) -> dict:
             break
     holding = [s for s in out.get("slots", []) if not s.get("end")]
     out["holding"] = bool(holding)
+
+    published = read_agent_state(state_file)
+    if published:
+        out["state"] = published
+        out["last_seen"] = published["_t"]
+        out["action"] = published.get("action") or out.get("action")
+        # The agent knows what it is holding; the log only implies it from an
+        # unclosed slot, which is why parse_slots truncating on schedule churn
+        # once made the two disagree on the same page.
+        out["holding"] = bool(published.get("cloud_held")
+                              or published.get("lease_held")) or out["holding"]
+        out["source"] = "state file"
+    else:
+        out["source"] = "log"
     return out
 
 

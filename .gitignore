@@ -42,3 +42,5 @@ service-status.txt
 .daikin-snapshot.log
 daikin-snapshot.log
 .shelly-labels.json
+.agent-state.json
+.agent-state.json.tmp

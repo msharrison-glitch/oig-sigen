@@ -195,6 +195,49 @@ def main() -> int:
     check("a flat series does not divide by zero",
           dashboard.sparkline([("a", 5), ("b", 5)]).startswith("<svg"), True)
 
+    print("\nThe dashboard prefers the agent's published state to the log")
+    import json as _json, tempfile as _tf, pathlib as _pl
+    _d = _pl.Path(_tf.mkdtemp())
+    log = _d / "observe.log"
+    log.write_text(
+        "2026-09-13 20:12:51 INFO    SOC 11.1% -> STARTED charging\n"
+        "2026-09-13 20:30:00 INFO    SOC 24.4%  grid +11.4 kW  ESS +10.2 kW "
+        "enable=0 mode=0 limit=unset work=9 -> holding\n", encoding="utf-8")
+
+    from_log = dashboard.read_agent(str(log), state_file=str(_d / "absent.json"))
+    check("with no state file it still reads the log",
+          from_log["source"], "log")
+    check("and finds the open slot", from_log["holding"], True)
+
+    fresh = _d / "agent-state.json"
+    fresh.write_text(_json.dumps({
+        "local": dt.datetime.now().isoformat(timespec="seconds"),
+        "soc": 63.5, "grid_kw": 11.4, "ess_kw": 10.2, "action": "holding",
+        "cloud_held": True, "lease_held": False, "work_mode": 9}),
+        encoding="utf-8")
+    from_state = dashboard.read_agent(str(log), state_file=str(fresh))
+    check("with one, it is preferred", from_state["source"], "state file")
+    check("the reading is the agent's, not the log's",
+          from_state["state"]["soc"], 63.5)
+    check("and 'holding' comes from the agent, not inferred from a slot",
+          from_state["holding"], True)
+    # The log said holding too, but the agent is authoritative -- parse_slots
+    # truncating on schedule churn once made the two disagree on one page.
+    quiet = _d / "idle-state.json"
+    quiet.write_text(_json.dumps({
+        "local": dt.datetime.now().isoformat(timespec="seconds"),
+        "soc": 20.0, "action": "idle", "cloud_held": False,
+        "lease_held": False}), encoding="utf-8")
+    check("a stale state file is still used for the reading",
+          dashboard.read_agent(str(log), state_file=str(quiet))["state"]["soc"],
+          20.0)
+
+    corrupt = _d / "corrupt.json"
+    corrupt.write_text("{not json", encoding="utf-8")
+    check("a half-written file falls back rather than crashing",
+          dashboard.read_agent(str(log), state_file=str(corrupt))["source"],
+          "log")
+
     print("\nMoney: a net INCOME must not read as a cost")
     # costs.py returns net = cost - income, so a profitable day is NEGATIVE.
     # Rendering that raw would show "-14.36" for a day you made money.

@@ -258,6 +258,14 @@ AGENT_VERSION = "1.0"
 # crash the controller is worse than no observer at all.
 HEARTBEAT_TIMEOUT = 5.0
 
+# What the plant looked like on the last tick, as JSON. The dashboard reads
+# this instead of opening its own Modbus connection: sigen.py enforces the
+# protocol's >=1s request spacing PER CLIENT INSTANCE, so a second reader
+# would have both processes believing they were compliant while together
+# exceeding it -- and this process is the one that commands the battery.
+# Written from data already in hand, so it costs no extra Modbus traffic.
+STATE_FILE = ".agent-state.json"
+
 # How long past a slot's end the cloud deadman waits before undoing a
 # charge selection. Long enough that a late tick is not treated as a failure,
 # short enough that a real failure is caught within a few minutes.
@@ -1103,6 +1111,7 @@ class Reconciler:
                  if state.charge_limit_kw is not None else "unset",
                  _work_mode(state.work_mode),
                  action, reason)
+        self.write_state(state, action)
         self.send_heartbeat(state, action)
         return action
 
@@ -1160,6 +1169,45 @@ class Reconciler:
         log.info("Zappi: %s, %s, %.2f kW", state["status"], state["plug"],
                  state["power_kw"] or 0.0)
         return drawing
+
+    def write_state(self, state: PlantState, action: str) -> bool:
+        """Publish this tick's plant reading. Never raises.
+
+        Atomic: written to a temporary file in the same directory and
+        renamed, because the dashboard may read at any moment and a
+        half-written file would be a crash in the thing watching for
+        trouble. Same reasoning as everything else here -- a monitoring
+        aid must not be able to harm what it monitors, and that includes
+        failing to write it.
+        """
+        path = state_path(STATE_FILE)
+        payload = {
+            "at": utcnow().isoformat(),
+            "local": datetime.now().isoformat(timespec="seconds"),
+            "soc": state.soc,
+            "grid_kw": state.grid_kw,
+            "ess_kw": state.ess_kw,
+            "enable": state.enable,
+            "mode": state.mode,
+            "work_mode": state.work_mode,
+            "charge_limit_kw": state.charge_limit_kw,
+            "action": action,
+            "lease_held": bool(self.lease.held),
+            "cloud_held": bool(self.cloud_held),
+            "slots_known": len(self._slots),
+            "agent_version": AGENT_VERSION,
+            "dry_run": bool(self.dry_run),
+        }
+        try:
+            temp = path.with_name(path.name + ".tmp")
+            with open(temp, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, sort_keys=True)
+            os.replace(temp, path)
+            return True
+        except Exception as exc:                  # noqa: BLE001 - deliberate
+            log.warning("could not write %s (%s) -- the plant is unaffected",
+                        STATE_FILE, exc)
+            return False
 
     def send_heartbeat(self, state: PlantState, action: str) -> bool:
         """Tell the off-box watchdog what we just saw. Never raises.
