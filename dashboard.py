@@ -572,8 +572,14 @@ def value_now(points):
     return best if best is not None else points[0][1]
 
 
-def sparkline(points, width=320, height=48, fill=False, zero_base=True) -> str:
-    """An inline SVG line. No library, no CDN, no build step."""
+def sparkline(points, width=320, height=48, fill=False,
+              zero_base=True, fmt=None) -> str:
+    """An inline SVG line. No library, no CDN, no build step.
+
+    Pass `fmt` to make it hoverable: each half hour gets a
+    transparent rect with an SVG <title>, which browsers render
+    as a tooltip natively.
+    """
     values = [v for _, v in points if v is not None]
     if len(values) < 2:
         return '<span class="empty">not enough data</span>'
@@ -593,11 +599,34 @@ def sparkline(points, width=320, height=48, fill=False, zero_base=True) -> str:
     if fill and coords:
         area = (f'<polygon points="0,{height} {path} {width},{height}" '
                 f'fill="currentColor" opacity="0.14"/>')
+    # Hoverable bands, one per half hour, each carrying an SVG <title> --
+    # a NATIVE browser tooltip. No JavaScript, no library, nothing to load,
+    # so the page still works over an SSH tunnel with nothing installed.
+    #
+    # Half hours rather than the underlying five-minute points because that
+    # is the settlement period, the granularity the tariff actually changes
+    # at, and 48 bands instead of 288.
+    bands = ""
+    if fmt:
+        per_band = max(1, len(points) // 48)
+        for begin in range(0, len(points), per_band):
+            chunk = [pt for pt in points[begin:begin + per_band]
+                     if pt[1] is not None]
+            if not chunk:
+                continue
+            label = chunk[0][0]
+            clock = label[-5:] if isinstance(label, str) else ""
+            bands += (
+                f'<rect x="{begin * step:.1f}" y="0" '
+                f'width="{max(step * per_band, 1.0):.1f}" height="{height}" '
+                f'fill="transparent"><title>{escape(clock)}  '
+                f'{escape(fmt(chunk[-1][1]))}</title></rect>')
+
     return (f'<svg class="spark" viewBox="0 0 {width} {height}" '
             f'preserveAspectRatio="none" role="img">'
             f'{area}<polyline points="{path}" fill="none" '
             f'stroke="currentColor" stroke-width="1.7" '
-            f'vector-effect="non-scaling-stroke"/></svg>')
+            f'vector-effect="non-scaling-stroke"/>{bands}</svg>')
 
 
 def tariff_block(tariff: dict) -> str:
@@ -608,9 +637,16 @@ def tariff_block(tariff: dict) -> str:
         return (f'<p class="empty">Tariff history unavailable &mdash; '
                 f'{escape(tariff["error"])}</p>')
     rows = []
-    for key, title, tone in (("BUY_TARIFF", "Import price", "peak"),
-                             ("SELL_TARIFF", "Export price", "cheap"),
-                             ("SOC", "Battery SOC", "batt")):
+    def pence(v):
+        return f"{v * 100:.2f}p"
+
+    def percent(v):
+        return f"{v:.1f}%"
+
+    for key, title, tone, fmt in (
+            ("BUY_TARIFF", "Import price", "peak", pence),
+            ("SELL_TARIFF", "Export price", "cheap", pence),
+            ("SOC", "Battery SOC", "batt", percent)):
         points = tariff.get(key)
         if not points:
             continue
@@ -628,7 +664,7 @@ def tariff_block(tariff: dict) -> str:
             f'<div class="sparkrow">'
             f'<div class="sname">{escape(title)}'
             f'<span class="srange">{lo} &ndash; {hi}</span></div>'
-            f'<div class="sline g-{tone}">{sparkline(points, fill=True)}</div>'
+            f'<div class="sline g-{tone}">{sparkline(points, fill=True, fmt=fmt)}</div>'
             f'<div class="snow">{now}</div>'
             f'</div>')
     if not rows:
@@ -870,6 +906,7 @@ nav a.on {{ background:var(--cheap); color:#04231a; border-color:var(--cheap);
 .snow {{ text-align:right; font-weight:640; font-size:.88rem;
   font-variant-numeric:tabular-nums; }}
 .spark {{ width:100%; height:40px; display:block; }}
+.spark rect {{ cursor:crosshair; }}
 .g-peak {{ color:var(--peak); }} .g-cheap {{ color:var(--cheap); }}
 .g-batt {{ color:var(--batt); }}
 

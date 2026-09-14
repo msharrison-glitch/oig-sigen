@@ -372,6 +372,29 @@ def main() -> int:
     check("an unparseable label does not crash it",
           dashboard.value_now([("not a time", 0.2)]), 0.2)
 
+    print("\nSparklines are hoverable, natively, with no JavaScript")
+    _day = dt.datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    _series = [( (_day + dt.timedelta(minutes=5 * i)).strftime("%Y%m%d %H:%M"),
+                 0.0449 if (_day + dt.timedelta(minutes=5 * i)).time()
+                 >= dt.time(23, 30) or (_day + dt.timedelta(minutes=5 * i)).time()
+                 < dt.time(5, 30) else 0.29757)
+               for i in range(288)]
+    hoverable = dashboard.sparkline(_series, fill=True,
+                                    fmt=lambda v: f"{v * 100:.2f}p")
+    titles = re.findall(r"<title>([^<]*)</title>", hoverable)
+    check("288 five-minute points become 48 half-hour bands",
+          len(titles), 48)
+    check("a band is labelled with its clock time and value",
+          titles[0].strip(), "00:00  4.49p")
+    check("midday reads the peak rate", "29.76p" in titles[24], True)
+    check("and 23:30 picks up the guaranteed window",
+          "4.49p" in titles[47], True)
+    # SVG <title> is a browser-native tooltip: the whole point is that this
+    # needs nothing loaded, so the page still works over an SSH tunnel.
+    check("no script is involved", "<script" in hoverable, False)
+    check("and without a formatter there are no bands at all",
+          dashboard.sparkline(_series).count("<title>"), 0)
+
     print("\nThe tariff block answers 'was it cheap when we charged?'")
     # Time-relative, not hard-coded: value_now compares against the clock, so
     # a fixture pinned to one date would assert the wrong thing tomorrow. The
