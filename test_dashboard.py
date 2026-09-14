@@ -195,6 +195,29 @@ def main() -> int:
     check("a flat series does not divide by zero",
           dashboard.sparkline([("a", 5), ("b", 5)]).startswith("<svg"), True)
 
+    print("\nImport and export prices sit together, with the spread")
+    _n = dt.datetime.now().replace(second=0, microsecond=0)
+    _ago = lambda m: (_n - dt.timedelta(minutes=m)).strftime("%Y%m%d %H:%M")
+    both = {"BUY_TARIFF": [(_ago(60), 0.29757), (_ago(5), 0.29757)],
+            "SELL_TARIFF": [(_ago(60), 0.1694), (_ago(5), 0.1694)]}
+    cards = dashboard.hero({"sigen": {"soc": 50.0}, "tariff_soc": both})
+    check("the import price appears", "29.76p" in cards, True)
+    check("the export price appears beside it", "16.94p" in cards, True)
+    # Buying at 29.76 to sell at 16.94 loses money; the sign must say so.
+    check("and the spread is signed, showing the loss",
+          "-12.82p" in cards, True)
+
+    cheap = {"BUY_TARIFF": [(_ago(5), 0.0449)],
+             "SELL_TARIFF": [(_ago(5), 0.1694)]}
+    check("a cheap import shows a positive spread",
+          "+12.45p" in dashboard.hero({"sigen": {}, "tariff_soc": cheap}), True)
+    check("export alone still renders when there is no import series",
+          "16.94p" in dashboard.hero(
+              {"sigen": {}, "tariff_soc": {"SELL_TARIFF": [(_ago(5), 0.1694)]}}),
+          True)
+    check("and no tariff data at all is not a crash",
+          dashboard.hero({"sigen": {}, "tariff_soc": {}}), "")
+
     print("\nThe CURRENT price, not the last point in the series")
     # BUY_TARIFF carries all 288 points for the whole day including the
     # FUTURE, so points[-1] is always 23:55 -- inside the guaranteed cheap

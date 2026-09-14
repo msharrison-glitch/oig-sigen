@@ -634,7 +634,13 @@ def agent_block(agent: dict) -> str:
 
 
 def hero(snap: dict) -> str:
-    """The four things worth seeing from across the room."""
+    """The things worth seeing from across the room.
+
+    Import and export price sit together deliberately: the SPREAD between
+    them is the decision. Buying at 4.49p to sell at 16.94p is worth doing
+    and buying at 29.76p to sell at 16.94p is not, and neither number answers
+    that on its own.
+    """
     sigen = snap["sigen"]
     tariff = snap.get("tariff_soc") or {}
     cards = []
@@ -644,9 +650,22 @@ def hero(snap: dict) -> str:
         current = value_now(buy)
         price = (current if current is not None else buy[0][1]) * 100
         cheap = price < 10
-        cards.append((f"{price:.2f}p", "per kWh now",
+        cards.append((f"{price:.2f}p", "import now",
                       "cheap" if cheap else "peak",
                       "off-peak" if cheap else "peak rate"))
+
+    sell = (tariff.get("SELL_TARIFF") or [])
+    if sell and not tariff.get("error"):
+        current = value_now(sell)
+        out_p = (current if current is not None else sell[0][1]) * 100
+        # The spread, when both are known: what a kWh through the battery is
+        # worth right now, before round-trip losses.
+        sub = "export rate"
+        if buy and not tariff.get("error"):
+            spread = out_p - price
+            sub = (f"spread {spread:+.2f}p" if abs(spread) >= 0.005
+                   else "spread flat")
+        cards.append((f"{out_p:.2f}p", "export now", "cheap", sub))
 
     soc = sigen.get("soc")
     if soc is not None:
@@ -718,9 +737,8 @@ nav a {{ padding:.34rem .75rem; border:1px solid var(--line);
   font-size:.85rem; background:var(--panel); }}
 nav a.on {{ background:var(--cheap); color:#04231a; border-color:var(--cheap);
   font-weight:650; }}
-.cards {{ display:grid; gap:.7rem; grid-template-columns:repeat(2,1fr);
-  margin-bottom:1rem; }}
-@media (min-width:720px) {{ .cards {{ grid-template-columns:repeat(4,1fr); }} }}
+.cards {{ display:grid; gap:.7rem; margin-bottom:1rem;
+  grid-template-columns:repeat(auto-fit, minmax(148px, 1fr)); }}
 .card {{ background:var(--panel); border:1px solid var(--line);
   border-radius:12px; padding:.85rem .95rem; position:relative;
   overflow:hidden; }}
