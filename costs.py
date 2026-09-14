@@ -215,6 +215,19 @@ def dispatch_windows(lines, tz=None) -> list:
         end = dt.datetime.combine(date, dt.time(int(eh), int(em)))
         if end <= start:                       # crosses midnight
             end += dt.timedelta(days=1)
+        # SNAP THE START BACK TO THE HALF HOUR. Octopus dispatches are
+        # half-hour aligned -- completedDispatches returns exactly
+        # 19:00->19:30, 19:30->20:00 -- but the agent logs the slot TRIMMED
+        # TO NOW when it first sees it, so a dispatch that really began at
+        # 20:30 appears as "20:47 -> 23:30".
+        #
+        # Without this, a half hour whose start falls before the trimmed time
+        # is priced at PEAK even though the dispatch covered most of it. On
+        # this account that mispriced two of the three largest peak half-hours
+        # in a week -- 09 Sep 22:00 (dispatch seen 22:12) and 11 Sep 20:30
+        # (seen 20:47) -- overstating peak import by about 8 kWh.
+        start = start.replace(minute=0 if start.minute < 30 else 30,
+                              second=0, microsecond=0)
         spans.append((start, end))
     spans.sort()
     merged = []

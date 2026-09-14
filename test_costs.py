@@ -54,8 +54,25 @@ def main() -> int:
     windows = costs.dispatch_windows(LOG.splitlines())
     check("overlapping re-plans collapse", len(windows), 2)
     check("and the merged span runs to the latest end",
-          windows[0], (dt.datetime(2026, 9, 11, 20, 51),
-                       dt.datetime(2026, 9, 11, 23, 0)))
+          windows[0][1], dt.datetime(2026, 9, 11, 23, 0))
+
+    # The agent logs a slot TRIMMED TO NOW when it first sees it, so a
+    # dispatch that really began on the half hour appears as "20:51 -> 22:30".
+    # Octopus dispatches are half-hour aligned -- completedDispatches returns
+    # exactly 19:00->19:30 -- so the start is snapped back. Without it, the
+    # half hour containing the trimmed time is priced at PEAK despite the
+    # dispatch covering most of it, which overstated peak import on this
+    # account by roughly 8 kWh in a week.
+    check("a start of 20:51 snaps back to 20:30",
+          windows[0][0], dt.datetime(2026, 9, 11, 20, 30))
+    later = costs.dispatch_windows(
+        ["2026-09-11 21:40:00 INFO    SCHEDULE + added   21:47 -> 22:30 [dispatch]"])
+    check("and 21:47 snaps to 21:30",
+          later[0][0], dt.datetime(2026, 9, 11, 21, 30))
+    exact = costs.dispatch_windows(
+        ["2026-09-11 20:00:00 INFO    SCHEDULE + added   20:00 -> 22:30 [dispatch]"])
+    check("an already-aligned start is untouched",
+          exact[0][0], dt.datetime(2026, 9, 11, 20, 0))
     check("a separate day stays separate",
           windows[1][0], dt.datetime(2026, 9, 12, 8, 0))
     check("a log with no schedule lines yields none",
