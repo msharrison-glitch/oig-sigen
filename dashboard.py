@@ -1166,6 +1166,21 @@ def report_zappi(start, end) -> dict:
         return {"error": f"{type(exc).__name__}"}
 
 
+def report_costs(start, end, log_path) -> dict:
+    """Money, from costs.py. Never raises.
+
+    Meter readings lag roughly 22 hours, so "today" will be empty or partial
+    and that is the meter's doing. Reported as a count of half-hours so the
+    page can say how complete it is rather than presenting a third of a day
+    as if it were the whole thing.
+    """
+    try:
+        import costs
+        return costs.report(start, end, log_path)
+    except Exception as exc:                          # noqa: BLE001
+        return {"error": f"{type(exc).__name__}: {exc}"[:120]}
+
+
 def report_daikin(start, end, kind="day") -> dict:
     """Heat pump kWh, from whichever archive daikin.py keeps for that span.
 
@@ -1221,10 +1236,12 @@ def report_snapshot(period, shelly_hosts, labels, em_host=None) -> dict:
         sigen = pool.submit(report_sigen, start, end, kind)
         zap = pool.submit(report_zappi, start, end)
         daikin_f = pool.submit(report_daikin, start, end, kind)
+        money = pool.submit(report_costs, start, end, "observe.log")
 
         out["sigen"] = sigen.result()
         out["zappi"] = zap.result()
         out["daikin"] = daikin_f.result()
+        out["costs"] = money.result()
         out["em"] = {}
     history = load_shelly_history()
     begin = datetime.combine(start, datetime.min.time())
@@ -1238,6 +1255,62 @@ def kwh(value, dp=2):
     if value is None:
         return "&mdash;"
     return f"{value:.{dp}f}"
+
+
+def money_block(c: dict, expected_half_hours: int) -> str:
+    """Pounds. The only unit that answers "was any of this worth doing"."""
+    if c.get("error"):
+        return (f'<p class="empty">Costs unavailable &mdash; '
+                f'{escape(c["error"])}</p>')
+    got = c.get("half_hours") or 0
+    note = ""
+    if got < expected_half_hours * 0.9:
+        # Not an error: Octopus publishes meter readings about 22 hours late.
+        pct = 100.0 * got / expected_half_hours if expected_half_hours else 0
+        note = (f'<p class="empty">{got} of {expected_half_hours} half-hours '
+                f'settled ({pct:.0f}%) &mdash; Octopus publishes meter '
+                f'readings about a day late, so recent periods fill in '
+                f'afterwards.</p>')
+
+    net = c.get("net", 0.0)
+    # Negative net means income exceeded cost.
+    headline = (f'<div class="money {"good" if net < 0 else "bad"}">'
+                f'<div class="mbig">{"+" if net < 0 else "&minus;"}'
+                f'&pound;{abs(net):.2f}</div>'
+                f'<div class="cap">{"net income" if net < 0 else "net cost"}'
+                f'</div></div>')
+
+    rows = [
+        ("Imported", f"{c['import_kwh']:.2f} kWh",
+         f"&minus;&pound;{c['import_cost']:.2f}", "bad"),
+        ("&nbsp;&nbsp;at off-peak", f"{c['cheap_kwh']:.2f} kWh",
+         f"@ {c['off_peak_p']:.2f}p", ""),
+        ("&nbsp;&nbsp;at peak", f"{c['peak_kwh']:.2f} kWh",
+         f"@ {c['peak_p']:.3f}p", ""),
+        ("Exported", f"{c['export_kwh']:.2f} kWh",
+         f"+&pound;{c['export_income']:.2f}", "good"),
+    ]
+    if c.get("export_unpriced_kwh"):
+        rows.append(("&nbsp;&nbsp;unpriced",
+                     f"{c['export_unpriced_kwh']:.2f} kWh",
+                     "no rate published", ""))
+    table = "".join(
+        f'<div class="mrow"><div class="label">{name}</div>'
+        f'<div class="value">{kwh}</div>'
+        f'<div class="value {tone}">{amount}</div></div>'
+        for name, kwh, amount, tone in rows)
+
+    extra = ""
+    if c.get("vs_all_peak"):
+        extra = (f'<p class="empty">Off-peak import would have cost '
+                 f'&pound;{c["vs_all_peak"]:.2f} more at the peak rate '
+                 f'&mdash; a counterfactual and an upper bound, since '
+                 f'without a battery the house would not have imported the '
+                 f'same kilowatt-hours.</p>')
+    return headline + table + extra + (
+        '<p class="empty">Unit rates only; standing charges are not '
+        'included, so this will not reconcile with a bill on its own.</p>'
+        + note)
 
 
 def render_report(rep: dict) -> bytes:
@@ -1331,6 +1404,17 @@ nav a.on {{ background:#4a9; color:#fff; border-color:#4a9; font-weight:600; }}
 table {{ border-collapse:collapse; width:100%; }}
 td {{ padding:.34rem 0; border-bottom:1px solid var(--line); }}
 .label {{ width:62%; }}
+.money {{ margin:.2rem 0 .9rem; }}
+.mbig {{ font-size:2rem; font-weight:680; letter-spacing:-.02em;
+  font-variant-numeric:tabular-nums; line-height:1.05; }}
+.money.good .mbig {{ color:#1e6b34; }}
+.money.bad .mbig {{ color:#b3261e; }}
+.mrow {{ display:grid; grid-template-columns:1fr 6.5rem 6.5rem; gap:.5rem;
+  padding:.3rem 0; border-bottom:1px solid var(--line); }}
+.mrow .good {{ color:#1e6b34; }} .mrow .bad {{ color:#b3261e; }}
+@media (max-width:560px) {{
+  .mrow {{ grid-template-columns:1fr 5.4rem 5.4rem; font-size:.9rem; }}
+}}
 .value {{ text-align:right; font-variant-numeric:tabular-nums;
           font-weight:600; }}
 .note, .muted {{ color:var(--muted); font-size:.88rem; font-weight:400; }}
@@ -1340,6 +1424,9 @@ footer {{ margin-top:2rem; color:var(--muted); font-size:.82rem; }}
 <p class="muted">{rep['start']:%a %d %b} &ndash; {rep['end']:%a %d %b} &middot;
 <a href="/" style="color:inherit">live view</a></p>
 <nav>{tabs}</nav>
+
+<h2>Money</h2>
+{money_block(rep.get("costs") or {}, max(1, (rep["end"] - rep["start"]).days * 48 + 48))}
 
 <h2>Plant</h2>
 <table>{sigen_rows}</table>

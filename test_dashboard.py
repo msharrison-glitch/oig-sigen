@@ -195,6 +195,38 @@ def main() -> int:
     check("a flat series does not divide by zero",
           dashboard.sparkline([("a", 5), ("b", 5)]).startswith("<svg"), True)
 
+    print("\nMoney: a net INCOME must not read as a cost")
+    # costs.py returns net = cost - income, so a profitable day is NEGATIVE.
+    # Rendering that raw would show "-14.36" for a day you made money.
+    good = {"import_kwh": 52.65, "import_cost": 2.37, "cheap_kwh": 52.64,
+            "peak_kwh": 0.01, "export_kwh": 90.45, "export_income": 16.73,
+            "export_unpriced_kwh": 0.0, "net": -14.36, "vs_all_peak": 13.30,
+            "off_peak_p": 4.49, "peak_p": 29.757, "half_hours": 96}
+    block_html = dashboard.money_block(good, 96)
+    check("a negative net renders as income", "net income" in block_html, True)
+    check("and is shown positive with a plus",
+          "+&pound;14.36" in block_html, True)
+    check("not as a negative number", "&pound;-14.36" in block_html, False)
+
+    bad = dict(good, net=5.20, export_income=1.0)
+    check("a positive net renders as a cost",
+          "net cost" in dashboard.money_block(bad, 96), True)
+
+    print("\nPartial settlement is stated, not silently presented as whole")
+    thin = dict(good, half_hours=12)
+    check("a third of a day says so",
+          "settled" in dashboard.money_block(thin, 96), True)
+    check("a complete period does not nag",
+          "settled" in dashboard.money_block(good, 96), False)
+
+    print("\nThe counterfactual is labelled as one")
+    check("upper bound is stated", "upper bound" in block_html, True)
+    check("standing charges are disclaimed",
+          "standing charges" in block_html, True)
+    check("a failure degrades",
+          "Costs unavailable" in dashboard.money_block({"error": "CostError"}, 48),
+          True)
+
     print("\nImport and export prices sit together, with the spread")
     _n = dt.datetime.now().replace(second=0, microsecond=0)
     _ago = lambda m: (_n - dt.timedelta(minutes=m)).strftime("%Y%m%d %H:%M")
