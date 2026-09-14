@@ -238,6 +238,31 @@ def main() -> int:
           dashboard.read_agent(str(log), state_file=str(corrupt))["source"],
           "log")
 
+    print("\nBattery capacity comes from the plant, never hard-coded")
+    # 24.18 kWh is THIS plant. Baking it into a shared file hands the next
+    # adopter a confidently wrong kWh figure with nothing to signal why.
+    # Assert on the CODE, not the prose: the comment explaining why this
+    # matters legitimately names the figure.
+    code = "\n".join(l for l in SOURCE.splitlines()
+                     if not l.lstrip().startswith("#"))
+    check("no capacity literal is used in arithmetic",
+          bool(re.search(r"\*\s*24\.18|24\.18\s*\*", code)), False)
+    with_cap = dashboard.hero({"sigen": {"soc": 50.0},
+                               "agent": {"state": {"capacity_kwh": 24.18}},
+                               "tariff_soc": {}})
+    check("published capacity is used", "12.1 kWh of 24.2" in with_cap, True)
+    without = dashboard.hero({"sigen": {"soc": 50.0}, "agent": {},
+                              "tariff_soc": {}})
+    check("and without it, no invented kWh",
+          "state of charge" in without, True)
+    check("the percentage still shows either way", "50%" in without, True)
+
+    print("\nAn idle CT clamp is not a fault")
+    check("a small negative reads as zero", dashboard.watts(-1.0), "0 W")
+    check("so does a small positive", dashboard.watts(0.4), "0 W")
+    check("a real reading is untouched", dashboard.watts(38.2), "38 W")
+    check("and a real negative survives", dashboard.watts(-120.0), "-120 W")
+
     print("\nMoney: a net INCOME must not read as a cost")
     # costs.py returns net = cost - income, so a profitable day is NEGATIVE.
     # Rendering that raw would show "-14.36" for a day you made money.

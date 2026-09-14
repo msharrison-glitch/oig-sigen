@@ -548,6 +548,7 @@ class Reconciler:
         # When we selected the profile, so 30003 is given time to catch up
         # before it is trusted. See MODE_CONFIRM_GRACE.
         self._cloud_started_at: datetime | None = None
+        self._capacity_kwh: float | None = None
         # Slots we have given up on because the plant was taken off our
         # profile by someone else. Keyed like _confirmed, so it expires
         # naturally as slots pass.
@@ -1181,6 +1182,16 @@ class Reconciler:
         failing to write it.
         """
         path = state_path(STATE_FILE)
+        # Read ONCE and cache. The battery's rated capacity never changes, and
+        # publishing it means the dashboard can show kWh alongside SOC without
+        # hard-coding this plant's 24.18 into a file meant to be shared -- a
+        # second adopter would otherwise get a confidently wrong number.
+        if self._capacity_kwh is None:
+            try:
+                self._capacity_kwh = self.client.read_u32(
+                    R.ESS_RATED_CAPACITY.address, holding=False) / 100.0
+            except Exception:                     # noqa: BLE001
+                self._capacity_kwh = 0.0          # asked, unavailable
         payload = {
             "at": utcnow().isoformat(),
             "local": datetime.now().isoformat(timespec="seconds"),
@@ -1197,6 +1208,7 @@ class Reconciler:
             "slots_known": len(self._slots),
             "agent_version": AGENT_VERSION,
             "dry_run": bool(self.dry_run),
+            "capacity_kwh": self._capacity_kwh or None,
         }
         try:
             temp = path.with_name(path.name + ".tmp")

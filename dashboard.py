@@ -448,9 +448,16 @@ def kw(value, dp=2):
     return f"{value:.{dp}f} kW"
 
 
+# A CT clamp reads a little either side of zero when nothing is drawing.
+# Showing "-1 W" makes an idle circuit look like a fault.
+WATT_NOISE_FLOOR = 3.0
+
+
 def watts(value):
     if value is None:
         return "&mdash;"
+    if abs(value) < WATT_NOISE_FLOOR:
+        return "0 W"
     return f"{value:.0f} W"
 
 
@@ -477,8 +484,8 @@ def flow_rows(sigen: dict) -> str:
     battery, grid = sigen.get("battery"), sigen.get("grid")
     rows = [
         ("Solar", sigen.get("solar"), "solar",
-         "in" if (sigen.get("solar") or 0) > 0.01 else "idle"),
-        ("House", sigen.get("load"), "house", "out"),
+         "generating" if (sigen.get("solar") or 0) > 0.01 else "dark"),
+        ("House", sigen.get("load"), "house", ""),
         ("Battery", abs(battery) if battery is not None else None, "batt",
          "charging" if (battery or 0) > 0.01 else
          ("discharging" if (battery or 0) < -0.01 else "idle")),
@@ -712,8 +719,14 @@ def hero(snap: dict) -> str:
 
     soc = sigen.get("soc")
     if soc is not None:
-        cards.append((f"{soc:.0f}%", "battery", "batt",
-                      f"{soc / 100 * 24.18:.1f} kWh"))
+        # Capacity comes from the agent, which reads register 30083 once.
+        # Hard-coding this plant's 24.18 would hand a second adopter a
+        # confidently wrong kWh figure with nothing to indicate why.
+        capacity = ((snap.get("agent") or {}).get("state") or {}).get(
+            "capacity_kwh")
+        sub = (f"{soc / 100 * capacity:.1f} kWh of {capacity:.1f}"
+               if capacity else "state of charge")
+        cards.append((f"{soc:.0f}%", "battery", "batt", sub))
 
     grid = sigen.get("grid")
     if grid is not None:
@@ -805,7 +818,7 @@ nav a.on {{ background:var(--cheap); color:#04231a; border-color:var(--cheap);
 @media (min-width:860px) {{ .cols {{ grid-template-columns:1.05fr .95fr; }} }}
 
 .flow, .circuit {{ display:grid; align-items:center; gap:.2rem .6rem;
-  grid-template-columns:7.4rem 1fr 4.6rem 4.4rem;
+  grid-template-columns:minmax(9.5rem, auto) 1fr 4.6rem 4.4rem;
   grid-template-areas:"name bar val state"; padding:.32rem 0;
   border-bottom:1px solid var(--line); }}
 .fname, .cname {{ grid-area:name; }}
@@ -904,12 +917,12 @@ footer code {{ font-size:.95em; }}
     </div>
   </div>
   <div>
+    {('<div class="panel"><h2>Today</h2>' + tariff_block(tariff) + '</div>')
+     if tariff else ''}
     <div class="panel">
       <h2>Agent &amp; cheap slots</h2>
       {agent_block(snap['agent'])}
     </div>
-    {('<div class="panel"><h2>Today</h2>' + tariff_block(tariff) + '</div>')
-     if tariff else ''}
   </div>
 </div>
 
@@ -1307,21 +1320,25 @@ def money_block(c: dict, expected_half_hours: int) -> str:
                 f'{escape(c["error"])}</p>')
     got = c.get("half_hours") or 0
     note = ""
+    settled = ""
     if got < expected_half_hours * 0.9:
         # Not an error: Octopus publishes meter readings about 22 hours late.
         pct = 100.0 * got / expected_half_hours if expected_half_hours else 0
-        note = (f'<p class="empty">{got} of {expected_half_hours} half-hours '
-                f'settled ({pct:.0f}%) &mdash; Octopus publishes meter '
-                f'readings about a day late, so recent periods fill in '
-                f'afterwards.</p>')
+        settled = (f'<span class="settled">{pct:.0f}% settled</span>')
+        note = ('<p class="empty">Octopus publishes meter readings about a '
+                'day late, so recent periods fill in afterwards.</p>')
 
     net = c.get("net", 0.0)
     # Negative net means income exceeded cost.
+    days = max(1, expected_half_hours // 48)
+    per_day = abs(net) / days
+    compare = (f'{"+" if net < 0 else "&minus;"}&pound;{per_day:.2f} a day'
+               if days > 1 else "")
     headline = (f'<div class="money {"good" if net < 0 else "bad"}">'
                 f'<div class="mbig">{"+" if net < 0 else "&minus;"}'
-                f'&pound;{abs(net):.2f}</div>'
+                f'&pound;{abs(net):.2f}{settled}</div>'
                 f'<div class="cap">{"net income" if net < 0 else "net cost"}'
-                f'</div></div>')
+                f'{" &middot; " + compare if compare else ""}</div></div>')
 
     rows = [
         ("Imported", f"{c['import_kwh']:.2f} kWh",
@@ -1347,9 +1364,8 @@ def money_block(c: dict, expected_half_hours: int) -> str:
     if c.get("vs_all_peak"):
         extra = (f'<p class="empty">Off-peak import would have cost '
                  f'&pound;{c["vs_all_peak"]:.2f} more at the peak rate '
-                 f'&mdash; a counterfactual and an upper bound, since '
-                 f'without a battery the house would not have imported the '
-                 f'same kilowatt-hours.</p>')
+                 f'(upper bound &mdash; without a battery the house would '
+                 f'not have imported the same kWh).</p>')
     return headline + table + extra + (
         '<p class="empty">Unit rates only; standing charges are not '
         'included, so this will not reconcile with a bill on its own.</p>'
@@ -1372,8 +1388,8 @@ def render_report(rep: dict) -> bytes:
             f'<td class="value">{kwh(s.get(key))} kWh</td></tr>'
             for key, title in (("FROM_SOLAR", "Solar generated"),
                                ("TO_LOAD", "House consumed"),
-                               ("FROM_GRID", "Imported"),
-                               ("TO_GRID", "Exported"),
+                               ("FROM_GRID", "Imported (plant CT)"),
+                               ("TO_GRID", "Exported (plant CT)"),
                                ("TO_BATTERY", "Into battery"),
                                ("FROM_BATTERY", "Out of battery"))
             if s.get(key) is not None)
@@ -1448,6 +1464,8 @@ table {{ border-collapse:collapse; width:100%; }}
 td {{ padding:.34rem 0; border-bottom:1px solid var(--line); }}
 .label {{ width:62%; }}
 .money {{ margin:.2rem 0 .9rem; }}
+.settled {{ font-size:.72rem; font-weight:600; color:var(--muted);
+  margin-left:.55rem; vertical-align:middle; }}
 .mbig {{ font-size:2rem; font-weight:680; letter-spacing:-.02em;
   font-variant-numeric:tabular-nums; line-height:1.05; }}
 .money.good .mbig {{ color:#1e6b34; }}
@@ -1472,6 +1490,10 @@ footer {{ margin-top:2rem; color:var(--muted); font-size:.82rem; }}
 {money_block(rep.get("costs") or {}, max(1, (rep["end"] - rep["start"]).days * 48 + 48))}
 
 <h2>Plant</h2>
+<p class="muted">Measured by the SigenStor's own CT, over the whole period.
+Money above uses Octopus's settlement meter and only settled half-hours, so
+the two import and export figures are different instruments answering
+different questions and will not match.</p>
 <table>{sigen_rows}</table>
 
 <h2>Devices</h2>
