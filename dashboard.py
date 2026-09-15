@@ -235,6 +235,75 @@ def read_agent_state(path=None) -> dict:
     return raw
 
 
+# How old the agent's evidence may be before the price card stops trusting
+# it. Inside a slot the agent ticks every ~30 s, so five minutes of silence
+# means something is wrong -- and a dead agent must not leave the card
+# claiming cheap electricity.
+BONUS_FRESH = timedelta(minutes=5)
+
+# What the agent logs, in the tick it decides, while a dispatch slot is live:
+# charging it, sitting it out because the battery is at target, or waiting
+# for the car.
+LIVE_SLOT = ("cheap now [dispatch]", "inside a cheap slot", "waiting: slot")
+
+
+def bonus_status(lines, state=None, now=None):
+    """Is the house on the off-peak rate because of a bonus slot, right now?
+
+    Sigen's BUY_TARIFF cannot say: it knows only the static 23:30-05:30
+    schedule, so it prices a bonus slot at peak. The agent knows, and this
+    reads its verdict rather than asking Octopus or the Zappi again.
+
+      "charging"     the agent holds a confirmed slot now
+      "confirmed"    a slot is live and the car was seen drawing during this
+                     dispatch -- even if the agent has since stopped charging
+                     because the battery reached its target
+      "unconfirmed"  a slot is planned but the car has not been seen drawing,
+                     so it may never complete and would bill at PEAK
+      None           no live slot, or the evidence is stale
+
+    Confirmation counts from anywhere in the current dispatch window, not
+    only the latest tick, because the agent stops asking the Zappi once a
+    slot is confirmed and never asks while the battery is at target.
+    """
+    now = now or datetime.now()
+    if (state and state.get("_t") and now - state["_t"] <= BONUS_FRESH
+            and (state.get("cloud_held") or state.get("lease_held"))):
+        return "charging"
+
+    # The latest COMPLETE tick: its summary line, and the lines before it back
+    # to the previous summary. Lines after it belong to a tick in progress.
+    tick_at, live = None, False
+    for raw in reversed(lines[-300:]):
+        found = heatreport.LOG_LINE.match(raw)
+        if not found:
+            continue
+        rest = found.group(2)
+        if rest.startswith("SOC "):
+            if tick_at is not None:
+                break
+            tick_at = heatreport.parse_time(found.group(1))
+        elif tick_at is not None and rest.startswith(LIVE_SLOT):
+            live = True
+    if not live or tick_at is None or now - tick_at > BONUS_FRESH:
+        return None
+
+    import costs
+    window = next((w for w in costs.dispatch_windows(lines)
+                   if w[0] <= now < w[1]), None)
+    if window is not None:
+        for raw in reversed(lines):
+            found = heatreport.LOG_LINE.match(raw)
+            if not found:
+                continue
+            when = heatreport.parse_time(found.group(1))
+            if when < window[0]:
+                break
+            if found.group(2).startswith("DISPATCH ACTIVE") and when <= now:
+                return "confirmed"
+    return "unconfirmed"
+
+
 def read_agent(log_path: str, state_file=None) -> dict:
     """What the agent last saw and did. Parses, never polls.
 
@@ -275,6 +344,10 @@ def read_agent(log_path: str, state_file=None) -> dict:
         out["source"] = "state file"
     else:
         out["source"] = "log"
+    try:
+        out["bonus"] = bonus_status(lines, published)
+    except Exception:                             # noqa: BLE001
+        out["bonus"] = None           # unknown: the card falls back to Sigen
     return out
 
 
@@ -435,6 +508,10 @@ def snapshot(shelly_hosts, log_path, labels=None, history=False) -> dict:
         result["agent"] = agent.result()
         result["shellys"] = [f.result() for f in shellys]
         result["tariff_soc"] = tariff.result() if tariff else {}
+    # The same .env rate costs.py prices with, so the card and the money
+    # figures cannot disagree about what off-peak costs.
+    import costs
+    result["off_peak_p"] = costs.rates_from_env()[0]
     return result
 
 
@@ -754,9 +831,20 @@ def hero(snap: dict) -> str:
         current = value_now(buy)
         price = (current if current is not None else buy[0][1]) * 100
         cheap = price < 10
+        sub = "off-peak" if cheap else "peak rate"
+        # Sigen prices a bonus slot at peak, because it only knows the static
+        # schedule. The agent's verdict overrides it -- but only upward in
+        # confidence: an unconfirmed slot stays at peak, because that is what
+        # it bills at if the car never draws.
+        bonus = (snap.get("agent") or {}).get("bonus")
+        if not cheap and bonus in ("charging", "confirmed"):
+            import costs
+            price = snap.get("off_peak_p") or costs.DEFAULT_OFF_PEAK_P
+            cheap, sub = True, "off-peak · bonus slot"
+        elif not cheap and bonus == "unconfirmed":
+            sub = "bonus slot planned, unconfirmed"
         cards.append((f"{price:.2f}p", "import now",
-                      "cheap" if cheap else "peak",
-                      "off-peak" if cheap else "peak rate"))
+                      "cheap" if cheap else "peak", sub))
 
     sell = (tariff.get("SELL_TARIFF") or [])
     if sell and not tariff.get("error"):

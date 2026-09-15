@@ -343,6 +343,93 @@ def main() -> int:
     check("and no tariff data at all is not a crash",
           dashboard.hero({"sigen": {}, "tariff_soc": {}}), "")
 
+    print("\nA bonus slot is priced at off-peak, not at Sigen's peak")
+    # Sigen's BUY_TARIFF knows only the static schedule, so on 2026-09-15 the
+    # card read 29.76p while the agent charged a confirmed dispatch at 4.49p,
+    # under a banner on the same page saying the import was off-peak.
+    peak = {"BUY_TARIFF": [(_ago(5), 0.29757)],
+            "SELL_TARIFF": [(_ago(5), 0.1694)]}
+
+    def card(bonus):
+        return dashboard.hero({"sigen": {}, "tariff_soc": peak,
+                               "agent": {"bonus": bonus}, "off_peak_p": 4.49})
+    charging = card("charging")
+    check("charging a slot shows off-peak", "4.49p" in charging, True)
+    check("and says why", "bonus slot" in charging, True)
+    check("and the spread follows the real price", "+12.45p" in charging, True)
+    check("a confirmed slot at target is still off-peak",
+          "4.49p" in card("confirmed"), True)
+    unconfirmed = card("unconfirmed")
+    # Planned but the car never drew: that bills at PEAK. Showing 4.49p here
+    # would be the exact mistake the agent is built to avoid.
+    check("an unconfirmed slot stays at peak", "29.76p" in unconfirmed, True)
+    check("and says it is unconfirmed", "unconfirmed" in unconfirmed, True)
+    check("no slot is peak rate", "peak rate" in card(None), True)
+    check("the guaranteed window is untouched by the override",
+          "4.49p" in dashboard.hero({"sigen": {}, "tariff_soc": cheap,
+                                     "agent": {"bonus": None}}), True)
+
+    print("\nbonus_status reads the agent's verdict, and distrusts stale ones")
+    at = dt.datetime(2026, 9, 15, 21, 0, 0)
+
+    def lines(text):
+        return text.strip("\n").splitlines()
+    fresh_hold = {"_t": at - dt.timedelta(seconds=30), "cloud_held": True}
+    check("a fresh hold is charging",
+          dashboard.bonus_status([], fresh_hold, now=at), "charging")
+    check("a stale hold is not trusted",
+          dashboard.bonus_status([], {"_t": at - dt.timedelta(minutes=20),
+                                      "cloud_held": True}, now=at), None)
+
+    tonight = lines("""
+2026-09-15 20:00:11 INFO    SCHEDULE + added   20:00 -> 23:30 [dispatch]
+2026-09-15 20:00:18 INFO    Zappi: Paused, EV connected, not charging, 0.00 kW
+2026-09-15 20:00:18 INFO    waiting: slot 20:00 is planned but the car is not drawing, so it may never complete and would bill at peak
+2026-09-15 20:00:18 INFO    SOC 12.7%  grid -0.01 kW -> idle (dispatch unconfirmed)
+2026-09-15 20:09:20 INFO    Zappi: Boosting, charging, 7.29 kW
+2026-09-15 20:09:20 INFO    DISPATCH ACTIVE: the car is drawing, so this slot is really off-peak -- proceeding
+2026-09-15 20:09:26 INFO    SOC 12.3%  grid +0.01 kW -> STARTED charging
+2026-09-15 20:30:17 INFO    SCHEDULE + added   20:30 -> 23:30 [dispatch]
+2026-09-15 20:30:17 WARNING SCHEDULE - WITHDRAWN 20:00 -> 23:30 [dispatch] -- +30.3 min into it
+2026-09-15 20:58:00 INFO    SOC 95.0%  grid +11.40 kW -> RELEASED
+2026-09-15 20:59:30 INFO    inside a cheap slot but SOC is 95.2% (target 95.0%, resume below 85.0%) -- nothing to gain
+2026-09-15 20:59:30 INFO    SOC 95.2%  grid +0.40 kW -> idle (battery at target)
+2026-09-15 21:00:00 INFO    cheap now [dispatch]: octopus until 23:29:30 local
+""")
+    # Released at target, the car still charging: the house is on 4.49p. The
+    # agent stops asking the Zappi once confirmed, so the verdict has to come
+    # from earlier in the dispatch -- across the 20:30 re-plan, too.
+    check("confirmed and at target, across a re-plan",
+          dashboard.bonus_status(tonight, {}, now=at), "confirmed")
+    check("a line from a tick still in progress is ignored",
+          dashboard.bonus_status(tonight[:-1], {}, now=at), "confirmed")
+
+    waiting = lines("""
+2026-09-15 18:00:05 INFO    SCHEDULE + added   18:00 -> 18:30 [dispatch]
+2026-09-15 18:10:00 INFO    DISPATCH ACTIVE: the car is drawing, so this slot is really off-peak -- proceeding
+2026-09-15 18:29:30 INFO    SOC 40.0%  grid +11.40 kW -> RELEASED
+2026-09-15 20:55:02 INFO    SCHEDULE + added   20:30 -> 23:30 [dispatch]
+2026-09-15 20:59:40 INFO    waiting: slot 20:30 is planned but the car is not drawing, so it may never complete and would bill at peak
+2026-09-15 20:59:40 INFO    SOC 12.0%  grid +0.01 kW -> idle (dispatch unconfirmed)
+""")
+    check("a planned slot the car has not drawn in is unconfirmed",
+          dashboard.bonus_status(waiting, {}, now=at), "unconfirmed")
+    # The 18:10 confirmation belonged to a different dispatch. Carrying it
+    # forward would price a slot that may never complete at off-peak.
+    check("an earlier dispatch's confirmation does not carry over",
+          dashboard.bonus_status(waiting, {}, now=at) != "confirmed", True)
+    check("a stale tick is not evidence",
+          dashboard.bonus_status(waiting, {},
+                                 now=at + dt.timedelta(minutes=20)), None)
+    idle = lines("""
+2026-09-15 20:59:40 INFO    SOC 60.0%  grid +0.01 kW -> idle
+""")
+    check("no live slot is None", dashboard.bonus_status(idle, {}, now=at), None)
+    check("read_agent never lets this raise",
+          "bonus" in dashboard.read_agent(str(log),
+                                          state_file=str(_d / "absent.json")),
+          True)
+
     print("\nThe CURRENT price, not the last point in the series")
     # BUY_TARIFF carries all 288 points for the whole day including the
     # FUTURE, so points[-1] is always 23:55 -- inside the guaranteed cheap
