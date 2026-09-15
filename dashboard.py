@@ -713,8 +713,13 @@ def agent_block(agent: dict) -> str:
             when = slot["start"].strftime("%d %b %H:%M")
             if end:
                 mins = (end - slot["start"]).total_seconds() / 60
-                span = (f'{when} &rarr; {end.strftime("%H:%M")}'
-                        f'<span class="mins">{mins:.0f} min</span>')
+                # "&ge;": the log stopped showing the hold here, so the slot
+                # ran at least this long -- the agent restarted or died.
+                inferred = slot.get("end_inferred")
+                span = (f'{when} &rarr; {"&ge;" if inferred else ""}'
+                        f'{end.strftime("%H:%M")}'
+                        f'<span class="mins">{mins:.0f} min'
+                        f'{" or more" if inferred else ""}</span>')
                 live = ""
             else:
                 span = f'{when} &rarr; <strong>still open</strong>'

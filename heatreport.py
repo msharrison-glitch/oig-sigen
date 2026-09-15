@@ -56,8 +56,17 @@ ACTION = re.compile(r"->\s+(.+?)\s*$")
 # charging. Treating that word as an ending truncated live slots -- observed
 # 2026-09-13, when Octopus withdrew 20:09->23:30 and added 20:30->23:30 in the
 # same tick and the agent never paused, yet the slot was recorded as ending.
-ACTIONS_END = ("RELEASED", "STOOD DOWN", "RESTORE FAILED")
+#
+# `RESTORE FAILED` is not here either. `_cloud_stop` leaves `cloud_held` True
+# when the restore does not verify, so the plant is still on the charging
+# profile and the next tick retries; the slot really ends at the RELEASED that
+# follows, not at the first failed attempt to end it.
+ACTIONS_END = ("RELEASED", "STOOD DOWN")
 ACTION_START = "STARTED charging"
+
+# Tick actions that mean "we are still commanding a charge". The last of these
+# is the latest EVIDENCE a slot was live, which is where an orphaned slot ends.
+ACTIONS_HELD = (ACTION_START, "holding", "RESTORE FAILED")
 
 
 def parse_time(text: str):
@@ -82,8 +91,25 @@ def parse_slots(lines) -> list:
     drew, or the battery was already full) is not a period during which we
     were buying cheap electricity, and counting it would inflate the very
     number this report exists to measure.
+
+    A slot can also be ORPHANED: opened, then never closed, because the agent
+    stopped logging its release. A restart mid-slot does it (the cloud path
+    keeps charging and the new process logs STARTED again), so does a Modbus
+    tick fault, and so does an agent that died and was replaced after the
+    slot. A second STARTED used to overwrite the open slot, silently deleting
+    the minutes before it. An orphan is now closed at the last tick that
+    showed it held, and marked `end_inferred`: that is where the evidence
+    stops, so it can understate a slot but never invent one.
     """
-    slots, open_slot = [], None
+    slots, open_slot, last_held, last_tick = [], None, None, ""
+
+    def close(end, soc_end, inferred=False):
+        open_slot["end"] = end
+        open_slot["soc_end"] = soc_end
+        if inferred:
+            open_slot["end_inferred"] = True
+        slots.append(open_slot)
+
     for raw in lines:
         m = LOG_LINE.match(raw)
         if not m:
@@ -92,19 +118,29 @@ def parse_slots(lines) -> list:
         soc = SOC.search(rest)
         soc = float(soc.group(1)) if soc else None
 
-        found = ACTION.search(rest)
+        # Only the per-tick summary carries an action. Other lines contain
+        # "-> " too -- "SCHEDULE + added 20:30 -> 23:30", "heartbeat -> url".
+        found = ACTION.search(rest) if rest.startswith("SOC ") else None
         action = found.group(1) if found else ""
+        if not action:
+            continue
+        last_tick = action
 
         if action == ACTION_START:
+            if open_slot:
+                close(*last_held, inferred=True)
             open_slot = {"start": when, "soc_start": soc}
         elif open_slot and action.startswith(ACTIONS_END):
-            open_slot["end"] = when
-            open_slot["soc_end"] = soc
-            slots.append(open_slot)
+            close(when, soc)
             open_slot = None
-    if open_slot:                       # still charging at the end of the log
-        open_slot["end"] = None
-        slots.append(open_slot)
+        if open_slot and action.startswith(ACTIONS_HELD):
+            last_held = (when, soc)
+    if open_slot:
+        if last_tick.startswith(ACTIONS_HELD):
+            open_slot["end"] = None     # still charging at the end of the log
+            slots.append(open_slot)
+        else:                           # the agent has since logged not holding
+            close(*last_held, inferred=True)
     return slots
 
 
@@ -220,6 +256,10 @@ def main() -> int:
             soc = ""
             if slot.get("soc_start") is not None and slot.get("soc_end") is not None:
                 soc = f"   SOC {slot['soc_start']:.1f}% -> {slot['soc_end']:.1f}%"
+            # An inferred end is where the log stops showing the hold, not a
+            # logged release: the slot may have run longer.
+            if slot.get("end_inferred"):
+                soc += "   (end inferred: agent restarted or died)"
             print(f"  {span}{soc}")
         closed = [s for s in slots if s.get("end")]
         total = sum((s["end"] - s["start"]).total_seconds() / 60.0

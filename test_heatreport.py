@@ -11,10 +11,13 @@ quiet error would flow straight into the business case:
     them wrongly would silently shift every overlap by an hour, which in a
     report about half-hour slots is the difference between "it overlaps" and
     "it does not".
-  - a slot is a STARTED..RELEASED pair and nothing else. Planned dispatches
-    the agent DECLINED -- car not drawing, battery already full -- are not
-    periods of cheap import, and counting them would inflate the one number
-    the report exists to measure.
+  - a slot runs from STARTED to RELEASED or STOOD DOWN, and nothing else
+    opens one. Planned dispatches the agent DECLINED -- car not drawing,
+    battery already full -- are not periods of cheap import, and counting
+    them would inflate the one number the report exists to measure.
+  - a slot whose end was never logged (restart, crash) ends at its last
+    holding tick and is flagged `end_inferred`, rather than being erased by
+    the next STARTED or left looking live forever.
 
     python3 test_heatreport.py
 """
@@ -111,8 +114,7 @@ def main() -> int:
 
     print("\nThe other ways a slot really can end")
     for action, label in (("RELEASED", "a normal release"),
-                          ("STOOD DOWN (plant taken back)", "a stand-down"),
-                          ("RESTORE FAILED", "a failed restore")):
+                          ("STOOD DOWN (plant taken back)", "a stand-down")):
         log = [f"2026-09-13 20:00:00 INFO    SOC 10.0% -> STARTED charging",
                f"2026-09-13 20:30:00 INFO    SOC 30.0% -> {action}"]
         got = heatreport.parse_slots(log)
@@ -124,6 +126,81 @@ def main() -> int:
         "2026-09-13 20:00:00 INFO    SOC 10.0% -> STARTED charging",
         "2026-09-13 20:05:00 INFO    SOC 12.0% -> holding"])
     check("but 'holding' leaves it open", held[0].get("end"), None)
+
+    print("\nA failed restore is not an ending")
+    # _cloud_stop leaves cloud_held True when the restore does not verify, so
+    # the plant is still on the charging profile and the next tick retries.
+    # This test used to assert the opposite, pinning the bug in place.
+    failed = heatreport.parse_slots("""\
+2026-09-13 20:00:00 INFO    SOC 10.0% -> STARTED charging
+2026-09-13 23:29:30 INFO    SOC 95.0% -> RESTORE FAILED
+2026-09-13 23:30:05 INFO    SOC 95.0% -> RESTORE FAILED
+2026-09-13 23:30:40 INFO    SOC 95.0% -> RELEASED
+""".splitlines())
+    check("one slot, not two", len(failed), 1)
+    check("ending at the RELEASE that finally took",
+          failed[0]["end"], dt.datetime(2026, 9, 13, 23, 30, 40))
+    check("and not marked as inferred", failed[0].get("end_inferred"), None)
+
+    print("\nA second STARTED must not erase the slot already open")
+    # Cloud path, agent restarted mid-slot: nothing releases the profile, the
+    # plant charges straight through, and the new process logs STARTED again.
+    # The second STARTED used to overwrite the first, deleting 20 minutes.
+    restart = heatreport.parse_slots("""\
+2026-09-13 20:00:00 INFO    SOC 10.0% -> STARTED charging
+2026-09-13 20:19:30 INFO    SOC 18.0% -> holding
+2026-09-13 20:20:00 INFO    interrupted -- releasing
+2026-09-13 20:22:00 INFO    reconciler started (charging via cloud profile 9664 at 8.00 kW)
+2026-09-13 20:22:00 ERROR   plant is on a mode only we could have set (mode 9, profile 9664)
+2026-09-13 20:22:05 INFO    SOC 19.0% -> STARTED charging
+2026-09-13 20:59:30 INFO    SOC 40.0% -> RELEASED
+""".splitlines())
+    check("both segments survive", len(restart), 2)
+    check("the first ends at its last holding tick",
+          restart[0]["end"], dt.datetime(2026, 9, 13, 20, 19, 30))
+    check("marked as inferred, because nothing logged its end",
+          restart[0].get("end_inferred"), True)
+    check("with the SOC at that tick", restart[0]["soc_end"], 18.0)
+    check("and the minutes are no longer lost",
+          round(heatreport.overlap(restart, [])["slot_minutes"], 1), 56.9)
+
+    # An agent that died after its slot never logs RELEASED; the next STARTED
+    # may be a day later. Closing at that STARTED would invent 23 hours of
+    # charging, so the orphan ends where the evidence of holding ends.
+    died = heatreport.parse_slots("""\
+2026-09-13 20:00:00 INFO    SOC 10.0% -> STARTED charging
+2026-09-13 20:29:30 INFO    SOC 30.0% -> holding
+2026-09-14 09:00:00 INFO    SOC 60.0% -> idle
+2026-09-14 19:00:00 INFO    SOC 12.0% -> STARTED charging
+2026-09-14 19:29:30 INFO    SOC 30.0% -> RELEASED
+""".splitlines())
+    check("a death between slots keeps both", len(died), 2)
+    check("the orphan ends at its last holding tick, not the next day",
+          died[0]["end"], dt.datetime(2026, 9, 13, 20, 29, 30))
+    check("and the next slot is intact",
+          (died[1]["start"], died[1]["end"]),
+          (dt.datetime(2026, 9, 14, 19, 0), dt.datetime(2026, 9, 14, 19, 29, 30)))
+
+    print("\nAn orphan at the end of the log is not 'still open'")
+    # The dashboard reads an open slot as "holding now", so an orphan left
+    # open would claim a charge the agent has since logged it is not making.
+    tail = heatreport.parse_slots("""\
+2026-09-13 20:00:00 INFO    SOC 10.0% -> STARTED charging
+2026-09-13 20:29:30 INFO    SOC 30.0% -> holding
+2026-09-13 21:00:00 INFO    SOC 29.0% -> idle
+""".splitlines())
+    check("it is closed at its last holding tick",
+          (tail[0]["end"], tail[0].get("end_inferred")),
+          (dt.datetime(2026, 9, 13, 20, 29, 30), True))
+    # Other lines carry "-> " too, and must not count as the agent's action.
+    live = heatreport.parse_slots("""\
+2026-09-13 20:00:00 INFO    SOC 10.0% -> STARTED charging
+2026-09-13 20:29:30 INFO    SOC 30.0% -> holding
+2026-09-13 20:30:00 INFO    SCHEDULE + added   20:30 -> 23:30 [dispatch]
+2026-09-13 20:30:01 INFO    heartbeat -> http://192.168.2.18:8787/heartbeat
+""".splitlines())
+    check("but a slot still holding at the end stays open",
+          live[0]["end"], None)
 
     print("\nA slot still open at the end of the log")
     open_log = LOG.splitlines()[:3]
