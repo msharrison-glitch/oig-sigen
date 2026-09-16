@@ -44,6 +44,7 @@ import argparse
 import io
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -288,8 +289,7 @@ def bonus_status(lines, state=None, now=None):
     if not live or tick_at is None or now - tick_at > BONUS_FRESH:
         return None
 
-    import costs
-    window = next((w for w in costs.dispatch_windows(lines)
+    window = next((w for w in dispatch_coverage(lines)
                    if w[0] <= now < w[1]), None)
     if window is not None:
         for raw in reversed(lines):
@@ -302,6 +302,111 @@ def bonus_status(lines, state=None, now=None):
             if found.group(2).startswith("DISPATCH ACTIVE") and when <= now:
                 return "confirmed"
     return "unconfirmed"
+
+
+# "SCHEDULE + added   20:30 -> 23:30 [dispatch]" and the WITHDRAWN twin.
+SCHEDULE_EVENT = re.compile(
+    r"^SCHEDULE\s+(\+ added|- WITHDRAWN)\s+"
+    r"(\d{2}):(\d{2})\s*->\s*(\d{2}):(\d{2})")
+
+
+def dispatch_coverage(lines) -> list:
+    """When a dispatch was actually in force, from the agent's log.
+
+    A dispatch does NOT run to the end it was published with. Octopus
+    withdraws it when the car finishes: on 2026-09-15 the 20:30->23:30 slot
+    was withdrawn at 21:05:51, so the cheap period was 20:00-21:05 and not
+    the three and a half hours the schedule lines imply. Taking the published
+    end would paint two and a half hours of peak import as off-peak.
+
+    So a slot runs from its start to whichever comes first: its published end
+    or the moment it was withdrawn. Overlapping spans are merged, which is
+    what makes a re-plan (20:00 withdrawn, 20:30 added) one continuous
+    period rather than two.
+
+    Starts are snapped back to the half hour for the same reason costs.py
+    does it: Octopus dispatches are half-hour aligned, but the agent logs a
+    slot TRIMMED TO NOW when it first sees one, so "20:47 -> 23:30" is
+    really the 20:30 half hour.
+    """
+    spans, live = [], {}
+    for raw in lines:
+        found = heatreport.LOG_LINE.match(raw)
+        if not found:
+            continue
+        event = SCHEDULE_EVENT.match(found.group(2))
+        if not event:
+            continue
+        when = heatreport.parse_time(found.group(1))
+        kind, sh, sm, eh, em = event.groups()
+        start = when.replace(hour=int(sh), minute=int(sm), second=0,
+                             microsecond=0)
+        end = start.replace(hour=int(eh), minute=int(em))
+        if end <= start:                          # crosses midnight
+            end += timedelta(days=1)
+        start = start.replace(minute=0 if start.minute < 30 else 30)
+        key = (start, end)
+        if kind == "+ added":
+            live.setdefault(key, when)
+        elif key in live:
+            spans.append((start, min(end, when)))  # withdrawn: ends HERE
+            del live[key]
+    for (start, end) in live:                     # never withdrawn: full span
+        spans.append((start, end))
+    spans.sort()
+    merged = []
+    for start, end in spans:
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return [(a, b) for a, b in merged if b > a]
+
+
+def confirmed_bonus_windows(lines, now=None) -> list:
+    """Dispatch periods in which the car was actually seen drawing.
+
+    Only DISPATCH ACTIVE counts: without a confirmation gate the agent
+    charges on the plan alone, and a plan that never completes bills at peak
+    -- so a period with no confirmation is left priced at peak.
+
+    Trimmed at now. A live slot runs into the future and Octopus can still
+    withdraw the rest of it, so nothing ahead of the clock is claimed.
+    """
+    now = now or datetime.now()
+    active = [heatreport.parse_time(m.group(1))
+              for m in (heatreport.LOG_LINE.match(raw) for raw in lines)
+              if m and m.group(2).startswith("DISPATCH ACTIVE")]
+    spans = [(start, min(end, now))
+             for start, end in dispatch_coverage(lines)
+             if any(start <= when < end for when in active)]
+    return [(a, b) for a, b in spans if b > a]
+
+
+def correct_buy_tariff(points, windows, off_peak_p):
+    """Re-price the bonus slots Sigen's series shows at peak.
+
+    Returns (points, corrected). Only ever moves a price DOWN to the off-peak
+    rate, and only inside a confirmed window, so a wrong window cannot invent
+    an expensive half hour.
+    """
+    if not windows or not points:
+        return points, False
+    off = off_peak_p / 100.0
+    out, corrected = [], False
+    for label, value in points:
+        try:
+            when = datetime.strptime(label, "%Y%m%d %H:%M")
+        except (ValueError, TypeError):
+            out.append((label, value))
+            continue
+        if (value is not None and value > off
+                and any(a <= when < b for a, b in windows)):
+            out.append((label, off))
+            corrected = True
+        else:
+            out.append((label, value))
+    return out, corrected
 
 
 def read_agent(log_path: str, state_file=None) -> dict:
@@ -346,8 +451,10 @@ def read_agent(log_path: str, state_file=None) -> dict:
         out["source"] = "log"
     try:
         out["bonus"] = bonus_status(lines, published)
+        out["bonus_windows"] = confirmed_bonus_windows(lines)
     except Exception:                             # noqa: BLE001
         out["bonus"] = None           # unknown: the card falls back to Sigen
+        out["bonus_windows"] = []
     return out
 
 
@@ -719,8 +826,13 @@ def sparkline(points, width=320, height=48, fill=False,
             f'vector-effect="non-scaling-stroke"/></svg>')
 
 
-def tariff_block(tariff: dict) -> str:
-    """Price and SOC for today, which is the question this project asks."""
+def tariff_block(tariff: dict, windows=(), off_peak_p=None) -> str:
+    """Price and SOC for today, which is the question this project asks.
+
+    The import series comes from Sigen, which knows only the static
+    23:30-05:30 schedule -- so every bonus slot draws at peak unless the
+    agent's own record corrects it. Same evidence as the price card.
+    """
     if not tariff:
         return ""
     if tariff.get("error"):
@@ -740,6 +852,12 @@ def tariff_block(tariff: dict) -> str:
         points = tariff.get(key)
         if not points:
             continue
+        if key == "BUY_TARIFF":
+            import costs
+            points, corrected = correct_buy_tariff(
+                points, windows, off_peak_p or costs.DEFAULT_OFF_PEAK_P)
+            if corrected:
+                title += " *"
         values = [v for _, v in points]
         current = value_now(points)
         if current is None:
@@ -759,6 +877,13 @@ def tariff_block(tariff: dict) -> str:
             f'</div>')
     if not rows:
         return '<p class="empty">No tariff series for today yet.</p>'
+    if any(" *" in row for row in rows):
+        # Say that the line is not Sigen's own, and why. A silently rewritten
+        # price would be indistinguishable from Sigen having understood IOG.
+        rows.append('<p class="meta">* bonus slots re-priced to '
+                    f'{(off_peak_p or 4.49):.2f}p from the agent\'s log; '
+                    'Sigen prices them at peak because it knows only the '
+                    'fixed 23:30&ndash;05:30 window.</p>')
     return "".join(rows)
 
 
@@ -1073,7 +1198,9 @@ footer code {{ font-size:.95em; }}
     </div>
   </div>
   <div>
-    {('<div class="panel"><h2>Today</h2>' + tariff_block(tariff) + '</div>')
+    {('<div class="panel"><h2>Today</h2>'
+      + tariff_block(tariff, (snap.get("agent") or {}).get("bonus_windows") or (),
+                     snap.get("off_peak_p")) + '</div>')
      if tariff else ''}
     <div class="panel">
       <h2>Agent &amp; cheap slots</h2>

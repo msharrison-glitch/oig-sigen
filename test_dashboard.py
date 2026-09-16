@@ -369,6 +369,91 @@ def main() -> int:
           "4.49p" in dashboard.hero({"sigen": {}, "tariff_soc": cheap,
                                      "agent": {"bonus": None}}), True)
 
+    print("\nThe Today chart re-prices confirmed bonus slots too")
+    # Same blind spot as the card: Sigen's series draws every bonus slot at
+    # peak, so the chart contradicted the "4.49p off-peak" card above it.
+    _today = dt.datetime.now().strftime("%Y%m%d")
+    _pt = lambda h, m: (f"{_today} {h:02d}:{m:02d}", 0.29757)
+    series = {"BUY_TARIFF": [_pt(19, 0), _pt(20, 0), _pt(20, 30), _pt(21, 0)]}
+    win = [(dt.datetime.now().replace(hour=20, minute=0, second=0,
+                                      microsecond=0),
+            dt.datetime.now().replace(hour=21, minute=0, second=0,
+                                      microsecond=0))]
+    block = dashboard.tariff_block(series, win, 4.49)
+    check("the slot's low price reaches the range", "4.49p" in block, True)
+    check("the correction is marked", "Import price *" in block, True)
+    check("and explained", "knows only the fixed" in block, True)
+    check("an uncorrected chart says nothing extra",
+          "*" in dashboard.tariff_block(series, [], 4.49), False)
+
+    fixed, corrected = dashboard.correct_buy_tariff(
+        series["BUY_TARIFF"], win, 4.49)
+    check("only points inside the window move",
+          [round(v, 4) for _, v in fixed],
+          [0.2976, 0.0449, 0.0449, 0.2976])
+    check("and it reports that it changed something", corrected, True)
+    # A price is only ever pulled DOWN: a wrong window cannot invent an
+    # expensive half hour out of a cheap one.
+    already = [(f"{_today} 23:45", 0.0449)]
+    check("an already-cheap point is untouched",
+          dashboard.correct_buy_tariff(already, win, 4.49), (already, False))
+    check("no windows, no change",
+          dashboard.correct_buy_tariff(series["BUY_TARIFF"], [], 4.49)[1],
+          False)
+
+    print("\nOnly dispatches the car actually drew in are re-priced")
+    at = dt.datetime(2026, 9, 15, 21, 0, 0)
+    confirmed_log = """
+2026-09-15 18:00:05 INFO    SCHEDULE + added   18:00 -> 18:30 [dispatch]
+2026-09-15 18:29:30 INFO    SOC 40.0% -> idle (dispatch unconfirmed)
+2026-09-15 20:00:11 INFO    SCHEDULE + added   20:00 -> 23:30 [dispatch]
+2026-09-15 20:09:20 INFO    DISPATCH ACTIVE: the car is drawing, so this slot is really off-peak -- proceeding
+2026-09-15 20:09:26 INFO    SOC 12.3% -> STARTED charging
+""".strip("\n").splitlines()
+    spans = dashboard.confirmed_bonus_windows(confirmed_log, now=at)
+    check("one window, the confirmed one", len(spans), 1)
+    check("it starts at the dispatch, not at the confirmation",
+          spans[0][0], dt.datetime(2026, 9, 15, 20, 0))
+    # The slot runs to 23:30 but Octopus can still withdraw the rest, so
+    # nothing past the clock is claimed as cheap.
+    check("and stops at now, not at the slot's end", spans[0][1], at)
+    check("a dispatch with no confirmation is not re-priced",
+          any(s[0].hour == 18 for s in spans), False)
+
+    print("\nA dispatch ends when it is WITHDRAWN, not at its published end")
+    # Real shape, 2026-09-15: published to 23:30, withdrawn at 21:05:51 when
+    # the car finished. Taking 23:30 would paint 2.4 hours of peak import as
+    # off-peak -- on the chart, and in the money figures.
+    withdrawn = """
+2026-09-15 20:00:11 INFO    SCHEDULE + added   20:00 -> 23:30 [dispatch]
+2026-09-15 20:09:20 INFO    DISPATCH ACTIVE: the car is drawing, so this slot is really off-peak -- proceeding
+2026-09-15 20:30:17 INFO    SCHEDULE + added   20:30 -> 23:30 [dispatch]
+2026-09-15 20:30:17 WARNING SCHEDULE - WITHDRAWN 20:00 -> 23:30 [dispatch] -- +30.3 min into it
+2026-09-15 21:05:51 WARNING SCHEDULE - WITHDRAWN 20:30 -> 23:30 [dispatch] -- +35.9 min into it
+2026-09-15 21:35:21 WARNING SCHEDULE - WITHDRAWN 22:00 -> 22:30 [dispatch] -- 24.6 min before it started
+""".strip("\n").splitlines()
+    later = dt.datetime(2026, 9, 15, 23, 59, 0)
+    cover = dashboard.dispatch_coverage(withdrawn)
+    check("the re-plan is one continuous period, not two", len(cover), 1)
+    check("starting at the first dispatch",
+          cover[0][0], dt.datetime(2026, 9, 15, 20, 0))
+    check("and ending at the withdrawal",
+          cover[0][1], dt.datetime(2026, 9, 15, 21, 5, 51))
+    check("the confirmed window matches it",
+          dashboard.confirmed_bonus_windows(withdrawn, now=later),
+          [(dt.datetime(2026, 9, 15, 20, 0),
+            dt.datetime(2026, 9, 15, 21, 5, 51))])
+    # A slot withdrawn before it ever started covers nothing: it was added at
+    # 22:00-22:30 and taken away at 21:35.
+    check("a slot withdrawn before it started covers nothing",
+          any(a.hour == 22 for a, _ in cover), False)
+    # A dispatch still live has no withdrawal, so it runs to its published
+    # end -- trimmed at now by confirmed_bonus_windows.
+    live_log = withdrawn[:3]
+    check("a live dispatch keeps its published end",
+          dashboard.dispatch_coverage(live_log)[0][1],
+          dt.datetime(2026, 9, 15, 23, 30))
+
     print("\nbonus_status reads the agent's verdict, and distrusts stale ones")
     at = dt.datetime(2026, 9, 15, 21, 0, 0)
 
