@@ -369,6 +369,71 @@ def main() -> int:
           "4.49p" in dashboard.hero({"sigen": {}, "tariff_soc": cheap,
                                      "agent": {"bonus": None}}), True)
 
+    print("\nThe car, read from the charger and never commanded")
+    # myenergi's API can start a charge, pause one, and set a boost. None of
+    # those verbs may ever appear here: this page watches, like the rest of
+    # the dashboard.
+    # These are myenergi's own command endpoints -- the mode/boost setters.
+    # Reading the word "boost" is fine: the hourly series has a boost field.
+    for forbidden in ("cgi-zappi-mode", "cgi-boost-time", "cgi-set-"):
+        check(f"no {forbidden!r} in the source", forbidden in SOURCE, False)
+
+    live = {"power_kw": 7.29, "charging": True, "status": "Boosting",
+            "mode": "Eco+", "plug": "EV connected", "added_kwh": 12.4}
+    dashboard._zappi_cache["at"] = None
+    got = dashboard.read_zappi(status_fn=lambda: live)
+    check("the rate is read", got["power_kw"], 7.29)
+    check("with the status that proves a dispatch is real",
+          (got["status"], got["charging"]), ("Boosting", True))
+    # A second call inside the TTL must not hit myenergi again: the page
+    # refreshes every 30s and several people may have it open.
+    calls = []
+
+    def counted():
+        calls.append(1)
+        return live
+    dashboard.read_zappi(status_fn=counted)
+    check("a second read inside the TTL is served from cache", calls, [])
+    dashboard._zappi_cache["at"] = None
+    check("and expiring the cache reads again",
+          dashboard.read_zappi(status_fn=counted)["power_kw"], 7.29)
+
+    def boom():
+        raise OSError("timed out")
+    dashboard._zappi_cache["at"] = None
+    check("an unreachable charger is an error, not a crash",
+          dashboard.read_zappi(status_fn=boom), {"error": "OSError"})
+    dashboard._zappi_cache["at"] = None
+    check("no Zappi on the account says so",
+          dashboard.read_zappi(status_fn=lambda: None)["error"],
+          "no Zappi on the account")
+    dashboard._zappi_cache["at"] = None
+
+    flow = {"solar": 0.1, "load": 0.4, "battery": -1.0, "grid": 0.5}
+    row = dashboard.flow_rows(flow, live)
+    check("the car appears in the flow", "7.29 kW" in row, True)
+    check("with its charger's own words", "Boosting, Eco+" in row, True)
+    # Plugged in but paused is worth seeing: it is the state that decides
+    # whether a planned dispatch will ever bill at 4.49p.
+    paused = dict(live, power_kw=0.0, charging=False, status="Paused")
+    check("a plugged-in car still shows at 0 kW",
+          "Paused" in dashboard.flow_rows(flow, paused), True)
+    check("an unreachable charger is visible on the page",
+          "charger unreachable" in dashboard.flow_rows(flow,
+                                                       {"error": "OSError"}),
+          True)
+    check("no charger configured adds no row",
+          "Car" in dashboard.flow_rows(flow, {}), False)
+    check("and Sigen's own evPower still shows if it ever reports one",
+          "2.00 kW" in dashboard.flow_rows(dict(flow, ev=2.0), {}), True)
+
+    card = dashboard.hero({"sigen": {}, "zappi": live})
+    check("a drawing car gets a card", "7.29" in card and "kW car" in card,
+          True)
+    check("with what it has added", "12.4 kWh added" in card, True)
+    check("a paused car does not",
+          "kW car" in dashboard.hero({"sigen": {}, "zappi": paused}), False)
+
     print("\nThe Today chart re-prices confirmed bonus slots too")
     # Same blind spot as the card: Sigen's series draws every bonus slot at
     # peak, so the chart contradicted the "4.49p off-peak" card above it.

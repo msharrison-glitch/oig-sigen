@@ -126,6 +126,52 @@ def read_sigen() -> dict:
     }
 
 
+# The car is polled straight from myenergi, not taken from the agent's log:
+# the agent asks the Zappi only while it is waiting to confirm a slot, and
+# stops once confirmed, so the log has nothing live to offer most of the time.
+# Sigen's own evPower is no use either -- it reads 0 on this plant, because
+# the charger is not registered with the Sigen gateway.
+ZAPPI_TTL = timedelta(seconds=20)
+_zappi_cache = {"at": None, "value": {}}
+_zappi_lock = threading.Lock()
+
+
+def read_zappi(status_fn=None, ttl=ZAPPI_TTL) -> dict:
+    """The car charger, READ-ONLY. Never raises.
+
+    Cached briefly: the page refreshes every 30 s and several people may have
+    it open, and myenergi's API is a third party's, not ours to hammer. An
+    unreachable charger degrades to an error line, exactly as a Shelly does.
+    """
+    now = datetime.now()
+    with _zappi_lock:
+        if _zappi_cache["at"] and now - _zappi_cache["at"] < ttl:
+            return _zappi_cache["value"]
+    try:
+        if status_fn is None:
+            import zappi
+            status_fn = zappi.client_from_env().status
+        state = status_fn()
+        if state is None:
+            out = {"error": "no Zappi on the account"}
+        else:
+            out = {
+                "power_kw": state.get("power_kw"),
+                "charging": bool(state.get("charging")),
+                "status": state.get("status"),
+                "mode": state.get("mode"),
+                "plug": state.get("plug"),
+                "added_kwh": state.get("added_kwh"),
+            }
+    except ConfigError:
+        out = {}                        # not configured: the car is not shown
+    except Exception as exc:                      # noqa: BLE001
+        out = {"error": f"{type(exc).__name__}"}
+    with _zappi_lock:
+        _zappi_cache["at"], _zappi_cache["value"] = now, out
+    return out
+
+
 def read_shelly(host: str) -> dict:
     """One Shelly, whatever generation. Never raises."""
     out = {"host": host, "name": None, "gen": None, "channels": []}
@@ -609,10 +655,12 @@ def snapshot(shelly_hosts, log_path, labels=None, history=False) -> dict:
     with ThreadPoolExecutor(max_workers=10) as pool:
         sigen = pool.submit(read_sigen)
         agent = pool.submit(read_agent, log_path)
+        zappi = pool.submit(read_zappi)
         tariff = pool.submit(read_tariff_soc) if history else None
         shellys = [pool.submit(read_shelly, h) for h in shelly_hosts]
         result["sigen"] = sigen.result()
         result["agent"] = agent.result()
+        result["zappi"] = zappi.result()
         result["shellys"] = [f.result() for f in shellys]
         result["tariff_soc"] = tariff.result() if tariff else {}
     # The same .env rate costs.py prices with, so the card and the money
@@ -655,7 +703,7 @@ def bar(value, peak, tone) -> str:
             f'class="t-{tone}"></i></div>')
 
 
-def flow_rows(sigen: dict) -> str:
+def flow_rows(sigen: dict, zappi=None) -> str:
     """The four quantities that make up the house's energy balance.
 
     Shown as proportional bars against the largest of them, because the point
@@ -677,7 +725,18 @@ def flow_rows(sigen: dict) -> str:
          "exporting" if (grid or 0) > 0.01 else
          ("importing" if (grid or 0) < -0.01 else "idle")),
     ]
-    if (sigen.get("ev") or 0) > 0.01:
+    zappi = zappi or {}
+    car = zappi.get("power_kw")
+    if zappi.get("error"):
+        rows.append(("Car", None, "ev", f"charger unreachable "
+                                        f"({zappi['error']})"))
+    elif car is not None and (car > 0.01 or zappi.get("plug")):
+        # Shown even at 0 kW when the car is plugged in: "connected, not
+        # charging" is the state that decides whether a bonus slot counts.
+        rows.append(("Car", car, "ev",
+                     ", ".join(x for x in (zappi.get("status"),
+                                           zappi.get("mode")) if x)))
+    elif (sigen.get("ev") or 0) > 0.01:
         rows.append(("Car", sigen["ev"], "ev", "charging"))
     if (sigen.get("heat_pump") or 0) > 0.01:
         rows.append(("Heat pump", sigen["heat_pump"], "heat", "running"))
@@ -1001,6 +1060,16 @@ def hero(snap: dict) -> str:
                                                    else "import"),
                       "grid", "exporting" if grid > 0 else "importing"))
 
+    # The car earns a card only while it is actually drawing: that is what
+    # makes a planned dispatch real, and the bonus slots exist because of it.
+    zappi = snap.get("zappi") or {}
+    car = zappi.get("power_kw")
+    if car is not None and car > 0.01:
+        added = zappi.get("added_kwh")
+        cards.append((f"{car:.2f}", "kW car", "ev",
+                      f"{zappi.get('status') or 'charging'}"
+                      + (f" · {added:.1f} kWh added" if added else "")))
+
     today = sigen.get("solar_today")
     if today is not None:
         cards.append((f"{today:.2f} kWh", "solar today", "solar",
@@ -1190,7 +1259,7 @@ footer code {{ font-size:.95em; }}
   <div>
     <div class="panel">
       <h2>Now</h2>
-      {flow_rows(sigen)}
+      {flow_rows(sigen, snap.get("zappi"))}
     </div>
     <div class="panel">
       <h2>Circuits</h2>
