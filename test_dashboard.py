@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import datetime as dt
 import io
+import json
 import re
 from pathlib import Path
 
@@ -368,6 +369,63 @@ def main() -> int:
     check("the guaranteed window is untouched by the override",
           "4.49p" in dashboard.hero({"sigen": {}, "tariff_soc": cheap,
                                      "agent": {"bonus": None}}), True)
+
+    print("\nHeat pump temperatures, from the snapshot and not from Daikin")
+    # The API budget is 200 requests a day and the token lives on the polling
+    # host. The dashboard reads the record daikin.py already wrote; a second
+    # client would spend the same budget twice and fight over the token.
+    for forbidden in ("onecta", "daikineurope", "import daikin"):
+        check(f"no {forbidden!r} in the source", forbidden in SOURCE, False)
+
+    def snapshot(when, room=22.1, outdoor=16):
+        return json.dumps({
+            "fetched_at": when,
+            "points": {
+                "climateControl": {
+                    "onOffMode": "off", "setpointMode": "weatherDependent",
+                    "sensors": {"roomTemperature": room,
+                                "outdoorTemperature": outdoor,
+                                "leavingWaterTemperature": 16}},
+                "domesticHotWaterTank": {
+                    "onOffMode": "on",
+                    "sensors": {"tankTemperature": 46}}}}) + "\n"
+
+    recent = (dt.datetime.now() - dt.timedelta(minutes=12)).strftime(
+        "%Y-%m-%dT%H:%M:%S+0100")
+    hp_file = _d / "hp.jsonl"
+    # Two records: the last one wins, which is what "now" means here.
+    hp_file.write_text(snapshot("2026-09-18T20:00:07+0100", room=19.0)
+                       + snapshot(recent))
+    hp = dashboard.read_heatpump(str(hp_file))
+    check("the latest record is the one read",
+          (hp["room"], hp["outdoor"]), (22.1, 16))
+    check("hot water and leaving water too",
+          (hp["tank"], hp["water"]), (46, 16))
+    check("with the state around them",
+          (hp["heating"], hp["water_on"]), ("off", "on"))
+    check("a fresh snapshot is not stale", hp["stale"], False)
+
+    row = dashboard.heatpump_row(hp)
+    check("the room temperature is shown", "22.1&deg;C" in row, True)
+    check("and the outdoor one", "16&deg;C" in row and "outdoor" in row, True)
+    # Up to half an hour old by design, so the age is part of the reading.
+    check("the age is stated", "12 min ago" in row, True)
+
+    old = _d / "old.jsonl"
+    old.write_text(snapshot((dt.datetime.now() - dt.timedelta(hours=3))
+                            .strftime("%Y-%m-%dT%H:%M:%S+0100")))
+    stale = dashboard.read_heatpump(str(old))
+    check("an old snapshot is flagged", stale["stale"], True)
+    check("and says so on the page",
+          "STALE" in dashboard.heatpump_row(stale), True)
+
+    check("a missing file is not a crash",
+          dashboard.read_heatpump(str(_d / "nope.jsonl")), {})
+    check("and renders nothing at all", dashboard.heatpump_row({}), "")
+    broken = _d / "broken.jsonl"
+    broken.write_text("{not json\n")
+    check("a corrupt line is not a crash",
+          dashboard.read_heatpump(str(broken)), {})
 
     print("\nThe car, read from the charger and never commanded")
     # myenergi's API can start a charge, pause one, and set a boost. None of

@@ -172,6 +172,51 @@ def read_zappi(status_fn=None, ttl=ZAPPI_TTL) -> dict:
     return out
 
 
+HEATPUMP_FILE = ".daikin-history.jsonl"
+# The snapshot task runs at most every ~29 minutes, to stay inside Daikin's
+# 200-requests-a-day budget, so a reading up to half an hour old is NORMAL.
+# Past an hour something has stopped and the page should say so rather than
+# present a stale temperature as the current one.
+HEATPUMP_STALE = timedelta(hours=1)
+
+
+def read_heatpump(path=None) -> dict:
+    """Temperatures from the heat pump snapshot file. Never raises.
+
+    Reads what daikin.py --snapshot already wrote; makes NO API call. The
+    budget is 200 requests a day and the token lives on the host that polls,
+    so the dashboard stays a reader of the record, not a second client.
+    """
+    path = path or str(state_path(HEATPUMP_FILE))
+    try:
+        with io.open(path, "rb") as handle:       # last line, cheaply
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - 8192))
+            last = handle.read().decode("utf-8", "replace").strip().splitlines()
+        record = json.loads(last[-1])
+    except (OSError, ValueError, IndexError):
+        return {}
+    points = record.get("points") or {}
+    climate = (points.get("climateControl") or {})
+    tank = (points.get("domesticHotWaterTank") or {})
+    sensed = climate.get("sensors") or {}
+    out = {
+        "room": sensed.get("roomTemperature"),
+        "outdoor": sensed.get("outdoorTemperature"),
+        "water": sensed.get("leavingWaterTemperature"),
+        "tank": (tank.get("sensors") or {}).get("tankTemperature"),
+        "heating": climate.get("onOffMode"),
+        "water_on": tank.get("onOffMode"),
+    }
+    try:
+        out["at"] = heatreport.parse_time(record["fetched_at"])
+    except (KeyError, ValueError):
+        return out
+    out["stale"] = (datetime.now() - out["at"]) > HEATPUMP_STALE
+    return out
+
+
 def read_shelly(host: str) -> dict:
     """One Shelly, whatever generation. Never raises."""
     out = {"host": host, "name": None, "gen": None, "channels": []}
@@ -656,11 +701,13 @@ def snapshot(shelly_hosts, log_path, labels=None, history=False) -> dict:
         sigen = pool.submit(read_sigen)
         agent = pool.submit(read_agent, log_path)
         zappi = pool.submit(read_zappi)
+        heatpump = pool.submit(read_heatpump)
         tariff = pool.submit(read_tariff_soc) if history else None
         shellys = [pool.submit(read_shelly, h) for h in shelly_hosts]
         result["sigen"] = sigen.result()
         result["agent"] = agent.result()
         result["zappi"] = zappi.result()
+        result["heatpump"] = heatpump.result()
         result["shellys"] = [f.result() for f in shellys]
         result["tariff_soc"] = tariff.result() if tariff else {}
     # The same .env rate costs.py prices with, so the card and the money
@@ -752,6 +799,47 @@ def flow_rows(sigen: dict, zappi=None) -> str:
             f'<div class="fstate s-{tone}">{escape(state)}</div>'
             f'</div>')
     return "".join(out)
+
+
+def heatpump_row(hp: dict) -> str:
+    """Heat pump temperatures, with the age of the reading.
+
+    The age is not decoration. This is a snapshot taken up to half an hour
+    ago, not a live sensor like everything else in this panel, and a room
+    temperature presented as current when it is 40 minutes old would be
+    indistinguishable from a working feed.
+    """
+    if not hp:
+        return ""
+    bits = []
+    for label, key, unit in (("room", "room", "&deg;C"),
+                             ("outdoor", "outdoor", "&deg;C"),
+                             ("water out", "water", "&deg;C"),
+                             ("tank", "tank", "&deg;C")):
+        value = hp.get(key)
+        if value is not None:
+            bits.append(f'<span class="hval">{value:g}{unit}</span> '
+                        f'{escape(label)}')
+    if not bits:
+        return ""
+    state = []
+    if hp.get("heating"):
+        state.append(f'heating {escape(hp["heating"])}')
+    if hp.get("water_on"):
+        state.append(f'hot water {escape(hp["water_on"])}')
+    when = hp.get("at")
+    age = ""
+    if when:
+        minutes = (datetime.now() - when).total_seconds() / 60
+        age = (f' &middot; {minutes:.0f} min ago'
+               if minutes < 90 else
+               f' &middot; {minutes / 60:.1f} h ago &mdash; STALE, has the '
+               f'snapshot task stopped?')
+    return (f'<div class="hp{" stale" if hp.get("stale") else ""}">'
+            f'<span class="hname">Heat pump</span> '
+            + " &middot; ".join(bits)
+            + (" &middot; " + ", ".join(state) if state else "")
+            + age + '</div>')
 
 
 def shelly_rows(shellys, labels=None) -> str:
@@ -1235,6 +1323,14 @@ nav a.on {{ background:var(--cheap); color:#04231a; border-color:var(--cheap);
 .alarm {{ color:var(--peak); font-weight:640; font-size:.85rem;
   margin:0 0 .6rem; }}
 .empty {{ color:var(--muted); font-size:.85rem; margin:.2rem 0; }}
+/* The heat pump is a SNAPSHOT up to half an hour old, not a live sensor
+   like the rows above it, so it reads as a footnote rather than a row. */
+.hp {{ color:var(--muted); font-size:.82rem; margin:.55rem 0 0;
+  padding-top:.5rem; border-top:1px solid var(--line); line-height:1.6; }}
+.hp.stale {{ color:var(--peak); }}
+.hname {{ color:var(--heat); font-weight:640; }}
+.hval {{ color:var(--text); font-variant-numeric:tabular-nums;
+  font-weight:600; }}
 footer {{ color:var(--muted); font-size:.75rem; line-height:1.5;
   margin-top:.4rem; }}
 footer code {{ font-size:.95em; }}
@@ -1260,6 +1356,7 @@ footer code {{ font-size:.95em; }}
     <div class="panel">
       <h2>Now</h2>
       {flow_rows(sigen, snap.get("zappi"))}
+      {heatpump_row(snap.get("heatpump") or {})}
     </div>
     <div class="panel">
       <h2>Circuits</h2>
