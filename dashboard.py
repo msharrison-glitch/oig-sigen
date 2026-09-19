@@ -818,8 +818,8 @@ def heatpump_row(hp: dict) -> str:
                              ("tank", "tank", "&deg;C")):
         value = hp.get(key)
         if value is not None:
-            bits.append(f'<span class="hval">{value:g}{unit}</span> '
-                        f'{escape(label)}')
+            bits.append(f'<span><span class="hval">{value:g}{unit}</span> '
+                        f'{escape(label)}</span>')
     if not bits:
         return ""
     state = []
@@ -831,15 +831,17 @@ def heatpump_row(hp: dict) -> str:
     age = ""
     if when:
         minutes = (datetime.now() - when).total_seconds() / 60
-        age = (f' &middot; {minutes:.0f} min ago'
-               if minutes < 90 else
-               f' &middot; {minutes / 60:.1f} h ago &mdash; STALE, has the '
-               f'snapshot task stopped?')
+        # One threshold, read from the flag, so the colour and the words
+        # cannot disagree about whether this reading is trustworthy.
+        age = (f'{minutes / 60:.1f} h ago &mdash; STALE, has the snapshot '
+               f'task stopped?' if hp.get("stale")
+               else f'{minutes:.0f} min ago')
+    footer = " &middot; ".join(x for x in (", ".join(state), age) if x)
     return (f'<div class="hp{" stale" if hp.get("stale") else ""}">'
-            f'<span class="hname">Heat pump</span> '
-            + " &middot; ".join(bits)
-            + (" &middot; " + ", ".join(state) if state else "")
-            + age + '</div>')
+            f'<span class="hname">Heat pump</span>'
+            + "".join(bits)
+            + (f'<span class="hage">{footer}</span>' if footer else "")
+            + '</div>')
 
 
 def shelly_rows(shellys, labels=None) -> str:
@@ -1158,6 +1160,18 @@ def hero(snap: dict) -> str:
                       f"{zappi.get('status') or 'charging'}"
                       + (f" · {added:.1f} kWh added" if added else "")))
 
+    # Outdoor temperature earns a card because it is the number that predicts
+    # the heat pump's demand, and the ASHP case is about moving that demand
+    # into bonus slots. A stale snapshot gets no card: the row below says so
+    # instead, rather than a headline quietly reporting yesterday's weather.
+    hp = snap.get("heatpump") or {}
+    if hp.get("outdoor") is not None and not hp.get("stale"):
+        inside = (f"{hp['room']:g}°C inside"
+                  if hp.get("room") is not None else "outdoor")
+        cards.append((f"{hp['outdoor']:g}°C", "outdoor", "heat",
+                      inside + (", heating on" if hp.get("heating") == "on"
+                                else "")))
+
     today = sigen.get("solar_today")
     if today is not None:
         cards.append((f"{today:.2f} kWh", "solar today", "solar",
@@ -1323,14 +1337,18 @@ nav a.on {{ background:var(--cheap); color:#04231a; border-color:var(--cheap);
 .alarm {{ color:var(--peak); font-weight:640; font-size:.85rem;
   margin:0 0 .6rem; }}
 .empty {{ color:var(--muted); font-size:.85rem; margin:.2rem 0; }}
-/* The heat pump is a SNAPSHOT up to half an hour old, not a live sensor
-   like the rows above it, so it reads as a footnote rather than a row. */
-.hp {{ color:var(--muted); font-size:.82rem; margin:.55rem 0 0;
-  padding-top:.5rem; border-top:1px solid var(--line); line-height:1.6; }}
+/* The heat pump is a SNAPSHOT up to half an hour old, not a live sensor like
+   the rows above it. It reads as its own block rather than a flow row for
+   that reason -- but not as grey small print, which was too easy to miss. */
+.hp {{ color:var(--muted); font-size:.9rem; margin:.7rem 0 0;
+  padding-top:.6rem; border-top:1px solid var(--line); line-height:1.9;
+  display:flex; flex-wrap:wrap; gap:.15rem .7rem; align-items:baseline; }}
 .hp.stale {{ color:var(--peak); }}
-.hname {{ color:var(--heat); font-weight:640; }}
+.hname {{ color:var(--heat); font-weight:700; font-size:.95rem;
+  letter-spacing:.01em; width:100%; }}
 .hval {{ color:var(--text); font-variant-numeric:tabular-nums;
-  font-weight:600; }}
+  font-weight:700; font-size:1.15rem; }}
+.hage {{ color:var(--muted); font-size:.78rem; width:100%; }}
 footer {{ color:var(--muted); font-size:.75rem; line-height:1.5;
   margin-top:.4rem; }}
 footer code {{ font-size:.95em; }}

@@ -419,6 +419,22 @@ def main() -> int:
     check("and says so on the page",
           "STALE" in dashboard.heatpump_row(stale), True)
 
+    # Outdoor temperature earns a headline card: it is what predicts the heat
+    # pump's demand, and moving that demand into bonus slots is the case the
+    # whole ASHP proposal rests on.
+    hp_card = dashboard.hero({"sigen": {}, "heatpump": hp})
+    check("outdoor gets a card", "16&deg;C" in hp_card or "16°C" in hp_card,
+          True)
+    check("with the inside temperature beside it",
+          "22.1°C inside" in hp_card, True)
+    # A stale snapshot must not headline: a quiet card reporting yesterday's
+    # weather is worse than no card, because nothing on it looks wrong.
+    check("a stale snapshot gets no card",
+          "outdoor" in dashboard.hero({"sigen": {}, "heatpump": stale}), False)
+    check("and the row's words match its colour",
+          "STALE" in dashboard.heatpump_row(stale)
+          and "stale" in dashboard.heatpump_row(stale), True)
+
     check("a missing file is not a crash",
           dashboard.read_heatpump(str(_d / "nope.jsonl")), {})
     check("and renders nothing at all", dashboard.heatpump_row({}), "")
