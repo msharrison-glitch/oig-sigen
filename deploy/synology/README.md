@@ -115,6 +115,9 @@ The next run of the task picks it up and restarts within five minutes.
   shell's own `cmdline`, so the search finds that shell and a `kill` aimed at
   the agent terminates your session instead. `repoll.sh` is safe because it is
   a *file* — its cmdline is `sh repoll.sh` — but an inline one-liner is not.
+  Hit four times now, most recently on 2026-09-18 restarting the dashboard,
+  which is why `restart-dashboard.sh` exists and why it also checks that the
+  process it is about to kill is really a Python one.
   For anything that signals the agent, take the pid from systemd rather than
   from string matching:
   ```sh
@@ -207,6 +210,34 @@ older flow needed. It now fails loudly into `service-status.txt` rather than
 half-running: without the guard, `sed` would fail, `set -e` would exit, and
 *both deadmen at the end of the script would never run* — every five minutes,
 indefinitely, while the task itself looked fine.
+
+## Optional: the energy dashboard
+
+`dashboard-start.sh` runs `dashboard.py --serve` on port 8099 and publishes it
+to the tailnet with `tailscale serve`. Run it from Task Scheduler as **root**,
+triggered *Boot-up*: the serve step needs root, and Task Scheduler already is,
+which sidesteps `sudo` having no terminal over SSH. It starts the server as
+the owner, so the state files it reads stay owned by the owner. Idempotent —
+running it again when the server is already up only re-checks the tailnet.
+
+`restart-dashboard.sh` picks up new code. Run it as the **owner**, no root:
+
+```sh
+sh ~/oig-sigen/restart-dashboard.sh
+```
+
+It stops whatever is serving and starts it again from the current files. The
+agent is untouched — it does not import `dashboard.py` — so this is safe
+mid-slot, where restarting the agent is not.
+
+**Both are files rather than inline commands, and that is the point.** Each
+has to find the running server by walking `/proc`, because BusyBox `pgrep -f`
+matches nothing here. An inline `ssh nas '...dashboard.py...'` puts that
+pattern into the remote shell's own cmdline, so the search finds the shell and
+kills the session instead of the server. That happened on 2026-09-18: the
+restart killed its own shell, the old server kept serving, and the deploy
+looked done while the new code was not running. `restart-dashboard.sh` also
+requires the process's `exe` to be Python, which a shell never is.
 
 ## Optional: observing the heat pump
 
