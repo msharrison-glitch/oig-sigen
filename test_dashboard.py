@@ -397,6 +397,35 @@ def main() -> int:
           "4.49p" in dashboard.hero({"sigen": {}, "tariff_soc": cheap,
                                      "agent": {"bonus": None}}), True)
 
+    print("\nThe headline cards must not contradict the rows below them")
+    # Seen on the phone, 2026-09-20 13:35: "0.0 kW import / importing" with
+    # "Grid 0.00 kW idle" two rows below it on the same page.
+    idle_grid = dashboard.hero({"sigen": {"grid": 0.0}})
+    check("an idle grid is not called importing",
+          "importing" in idle_grid, False)
+    check("it says idle", "idle" in idle_grid, True)
+    check("a real import still reads as importing",
+          "importing" in dashboard.hero({"sigen": {"grid": -2.0}}), True)
+    check("and a real export as exporting",
+          "exporting" in dashboard.hero({"sigen": {"grid": 2.0}}), True)
+
+    # Same screenshot: "spread -29.50p" in the green used for a good spread.
+    # Export at 0.26p against import at 29.76p is a loss, and the colour said
+    # otherwise. Agile Outgoing really does fall to 0.02p on a sunny Sunday.
+    _n2 = dt.datetime.now().replace(second=0, microsecond=0)
+    _a = lambda m: (_n2 - dt.timedelta(minutes=m)).strftime("%Y%m%d %H:%M")
+    bad_spread = {"BUY_TARIFF": [(_a(5), 0.29757)],
+                  "SELL_TARIFF": [(_a(5), 0.0026)]}
+    card = dashboard.hero({"sigen": {}, "tariff_soc": bad_spread})
+    check("the losing spread is shown", "-29.50p" in card, True)
+    check("and coloured as a loss, not as cheap",
+          'c-peak"><div class="big">0.26p' in card, True)
+    good_spread = {"BUY_TARIFF": [(_a(5), 0.0449)],
+                   "SELL_TARIFF": [(_a(5), 0.1694)]}
+    check("a profitable spread stays green",
+          'c-cheap"><div class="big">16.94p' in dashboard.hero(
+              {"sigen": {}, "tariff_soc": good_spread}), True)
+
     print("\nThe page reads the log's tail, not the whole growing file")
     # Measured on the NAS (DS213j): parsing 16,700 lines cost 5.8 s of a
     # 7.3 s page load, on a page that refreshes every 30 s -- and the log

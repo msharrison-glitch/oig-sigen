@@ -1198,11 +1198,18 @@ def hero(snap: dict) -> str:
         # The spread, when both are known: what a kWh through the battery is
         # worth right now, before round-trip losses.
         sub = "export rate"
+        tone = "cheap"
         if buy and not tariff.get("error"):
             spread = out_p - price
             sub = (f"spread {spread:+.2f}p" if abs(spread) >= 0.005
                    else "spread flat")
-        cards.append((f"{out_p:.2f}p", "export now", "cheap", sub))
+            # Colour by the SIGN, not by the card. A spread of -29.50p --
+            # buy now, sell now, lose 29.5p -- was rendered in the same green
+            # as a profitable one, so the arithmetic said one thing and the
+            # colour said the opposite.
+            if spread < -0.005:
+                tone = "peak"
+        cards.append((f"{out_p:.2f}p", "export now", tone, sub))
 
     soc = sigen.get("soc")
     if soc is not None:
@@ -1217,9 +1224,16 @@ def hero(snap: dict) -> str:
 
     grid = sigen.get("grid")
     if grid is not None:
-        cards.append((f"{abs(grid):.1f}", "kW " + ("export" if grid > 0
-                                                   else "import"),
-                      "grid", "exporting" if grid > 0 else "importing"))
+        # Zero is IDLE, not importing. Anything not positive used to read as
+        # "importing", so a grid sitting at 0.00 contradicted the flow row
+        # two lines below it on the same page. Same deadband as flow_rows.
+        if grid > 0.01:
+            cap, state = "kW export", "exporting"
+        elif grid < -0.01:
+            cap, state = "kW import", "importing"
+        else:
+            cap, state = "kW grid", "idle"
+        cards.append((f"{abs(grid):.1f}", cap, "grid", state))
 
     # The car earns a card only while it is actually drawing: that is what
     # makes a planned dispatch real, and the bonus slots exist because of it.
