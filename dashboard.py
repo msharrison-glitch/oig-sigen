@@ -422,6 +422,8 @@ def dispatch_coverage(lines) -> list:
     """
     spans, live = [], {}
     for raw in lines:
+        if "SCHEDULE" not in raw:         # cheap reject before any regex
+            continue
         found = heatreport.LOG_LINE.match(raw)
         if not found:
             continue
@@ -466,7 +468,8 @@ def confirmed_bonus_windows(lines, now=None) -> list:
     """
     now = now or datetime.now()
     active = [heatreport.parse_time(m.group(1))
-              for m in (heatreport.LOG_LINE.match(raw) for raw in lines)
+              for m in (heatreport.LOG_LINE.match(raw) for raw in lines
+                        if "DISPATCH ACTIVE" in raw)
               if m and m.group(2).startswith("DISPATCH ACTIVE")]
     spans = [(start, min(end, now))
              for start, end in dispatch_coverage(lines)
@@ -500,6 +503,34 @@ def correct_buy_tariff(points, windows, off_peak_p):
     return out, corrected
 
 
+# Parsing the log is the most expensive thing the page does, so it is cached
+# for less than one page refresh: several viewers, or a browser reloading
+# hard, then cost one parse rather than one each.
+AGENT_TTL = timedelta(seconds=20)
+_agent_cache = {"at": None, "key": None, "value": None}
+_agent_lock = threading.Lock()
+
+# How much of the log the page needs. It shows the last six slots and today's
+# dispatch periods; 9000 lines is over a week at the observed 600-1200 lines a
+# day. The log itself grows forever, so without a bound the page gets slower
+# every day it runs.
+AGENT_TAIL_LINES = 9000
+AGENT_TAIL_BYTES = 2_500_000
+
+
+def tail_lines(path: str, max_bytes=AGENT_TAIL_BYTES, max_lines=AGENT_TAIL_LINES):
+    """The last chunk of a file, as lines. Never reads the whole thing."""
+    with io.open(path, "rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        size = handle.tell()
+        handle.seek(max(0, size - max_bytes))
+        raw = handle.read().decode("utf-8", "replace")
+    lines = raw.splitlines(True)
+    if size > max_bytes and lines:
+        lines = lines[1:]                 # first line is probably a fragment
+    return lines[-max_lines:]
+
+
 def read_agent(log_path: str, state_file=None) -> dict:
     """What the agent last saw and did. Parses, never polls.
 
@@ -509,7 +540,19 @@ def read_agent(log_path: str, state_file=None) -> dict:
     """
     out = {"log": log_path}
     try:
-        lines = io.open(log_path, encoding="utf-8", errors="replace").readlines()
+        stat = os.stat(log_path)
+        # The state file belongs in the key: without it a second call for a
+        # different agent returns the first one's answer. The tests caught
+        # exactly that.
+        key = (log_path, state_file, stat.st_size, stat.st_mtime)
+        now = datetime.now()
+        with _agent_lock:
+            if (_agent_cache["key"] == key and _agent_cache["at"]
+                    and now - _agent_cache["at"] < AGENT_TTL):
+                return _agent_cache["value"]
+        # Only the tail: the log grows forever and the whole file is not
+        # needed for six slots and today's dispatch periods.
+        lines = tail_lines(log_path)
     except OSError as exc:
         out["error"] = f"{type(exc).__name__}"
         return out
@@ -546,6 +589,8 @@ def read_agent(log_path: str, state_file=None) -> dict:
     except Exception:                             # noqa: BLE001
         out["bonus"] = None           # unknown: the card falls back to Sigen
         out["bonus_windows"] = []
+    with _agent_lock:
+        _agent_cache.update(at=now, key=key, value=out)
     return out
 
 

@@ -397,6 +397,42 @@ def main() -> int:
           "4.49p" in dashboard.hero({"sigen": {}, "tariff_soc": cheap,
                                      "agent": {"bonus": None}}), True)
 
+    print("\nThe page reads the log's tail, not the whole growing file")
+    # Measured on the NAS (DS213j): parsing 16,700 lines cost 5.8 s of a
+    # 7.3 s page load, on a page that refreshes every 30 s -- and the log
+    # grows forever, so it was getting slower every day.
+    big = _d / "big.log"
+    body = "".join(f"2026-09-{(i % 28) + 1:02d} 10:00:00 DEBUG   sleeping 31s\n"
+                   for i in range(5000))
+    big.write_text(body + "2026-09-20 20:00:00 INFO    SOC 10.0% -> STARTED charging\n"
+                          "2026-09-20 20:30:00 INFO    SOC 30.0% -> RELEASED\n")
+    tail = dashboard.tail_lines(str(big), max_bytes=2000, max_lines=50)
+    check("the tail is bounded", len(tail) <= 50, True)
+    check("it is the END of the file, which is where now is",
+          "RELEASED" in tail[-1], True)
+    # A byte-bounded read lands mid-line; that fragment must not be parsed
+    # as though it were a whole line.
+    check("the partial first line is dropped",
+          tail[0].startswith("2026-"), True)
+    small = _d / "small.log"
+    small.write_text("one\ntwo\nthree\n")
+    check("a short file is returned whole",
+          len(dashboard.tail_lines(str(small), max_bytes=10 ** 6)), 3)
+
+    print("\nParsing is cached, but never across different agents")
+    dashboard._agent_cache.update(at=None, key=None, value=None)
+    first = dashboard.read_agent(str(log), state_file=str(fresh))
+    second = dashboard.read_agent(str(log), state_file=str(fresh))
+    check("a repeat read is served from cache", second is first, True)
+    # The state file belongs in the key. Without it, a second agent's page
+    # would show the first agent's plant.
+    other = dashboard.read_agent(str(log), state_file=str(quiet))
+    check("a different state file is not served the first one's answer",
+          other is first, False)
+    check("and it reads the right state",
+          other["state"]["soc"], 20.0)
+    dashboard._agent_cache.update(at=None, key=None, value=None)
+
     print("\nHouse load is derived, so the metered circuits sit beside it")
     # The Sigen's load figure is solar - battery - grid, so the inverter's
     # conversion losses are inside it. Measured 2026-09-20: ~93% battery
