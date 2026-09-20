@@ -313,6 +313,33 @@ def main() -> int:
     check("and the two series are countable separately",
           (out["import_half_hours"], out["export_half_hours"]), (0, 1))
 
+    print("\nImport and export settle at different speeds")
+    # Real shape, 2026-09-19: import complete (49 half hours), export stopped
+    # at 00:30 that day (2). The page called the day settled and printed
+    # "+GBP 0.00" of export income beside the plant's own record of a full
+    # day's export. The energy was sold; Octopus had not published it.
+    lagging = {"import_kwh": 48.805, "cheap_kwh": 48.805, "peak_kwh": 0.0,
+               "import_cost": 2.1913, "export_kwh": 0.0, "export_income": 0.0,
+               "net": 2.1913, "half_hours": 49, "import_half_hours": 49,
+               "export_half_hours": 2, "off_peak_p": 4.49, "peak_p": 29.757}
+    late = dashboard.money_block(lagging, 48)
+    check("the export row says it is still settling",
+          "Exported so far" in late and "4% settled" in late, True)
+    check("and the reason is given", "Export settles later" in late, True)
+    # A net of import minus an export nobody has published is not a net.
+    check("the headline does not present a net", "net cost" in late, False)
+    check("it shows the half that has settled",
+          "import only" in late and "2.19" in late, True)
+    # 49 half hours against an expected 48 must not read as "102% settled".
+    check("coverage is capped at 100%", "102%" in late, False)
+
+    settled_both = dict(lagging, export_kwh=40.0, export_income=7.20,
+                        net=-5.01, export_half_hours=48)
+    good = dashboard.money_block(settled_both, 48)
+    check("a fully settled period is unchanged",
+          "net income" in good and "settling" not in good, True)
+    check("and shows the real net", "5.01" in good, True)
+
     print("\nThe counterfactual is labelled as one")
     check("upper bound is stated", "upper bound" in block_html, True)
     check("standing charges are disclaimed",

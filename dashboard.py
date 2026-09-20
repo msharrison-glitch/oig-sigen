@@ -1836,6 +1836,20 @@ def money_block(c: dict, expected_half_hours: int) -> str:
                 f'day late. Totals here will keep rising; compare the Plant '
                 f'figures below for what actually happened.</p>')
 
+    # THE TWO SERIES SETTLE AT DIFFERENT SPEEDS, and judging them together
+    # hides the case that matters. Observed 2026-09-20: import for the 19th
+    # was complete (49 half hours) while export stopped at 00:30 that day (2
+    # half hours), so the day looked fully settled and the page printed
+    # "+GBP 0.00" of export income beside the plant's own record of a day's
+    # worth of export. The energy was sold; Octopus had not published it yet.
+    expected = expected_half_hours or 1
+    # Capped: a day can return 49 half hours at a clock change, or simply an
+    # extra boundary row, and "102% settled" reads like a bug.
+    imp_pct = min(100.0, 100.0 * (c.get("import_half_hours") or 0) / expected)
+    exp_pct = min(100.0, 100.0 * (c.get("export_half_hours") or 0) / expected)
+    export_settling = exp_pct < 90 and c.get("export_half_hours") is not None
+    import_settling = imp_pct < 90 and c.get("import_half_hours") is not None
+
     note = ""
     settled = ""
     if got < expected_half_hours * 0.9:
@@ -1844,6 +1858,12 @@ def money_block(c: dict, expected_half_hours: int) -> str:
         settled = (f'<span class="settled">{pct:.0f}% settled</span>')
         note = ('<p class="empty">Octopus publishes meter readings about a '
                 'day late, so recent periods fill in afterwards.</p>')
+    if export_settling and not note:
+        note = (f'<p class="empty">Export settles later than import &mdash; '
+                f'{exp_pct:.0f}% of this period\'s export half hours have '
+                f'reached the meter against {imp_pct:.0f}% of import, so the '
+                f'income here is not yet what was earned. Compare the Plant '
+                f'figures below.</p>')
 
     net = c.get("net", 0.0)
     # Negative net means income exceeded cost.
@@ -1851,11 +1871,20 @@ def money_block(c: dict, expected_half_hours: int) -> str:
     per_day = abs(net) / days
     compare = (f'{"+" if net < 0 else "&minus;"}&pound;{per_day:.2f} a day'
                if days > 1 else "")
-    headline = (f'<div class="money {"good" if net < 0 else "bad"}">'
-                f'<div class="mbig">{"+" if net < 0 else "&minus;"}'
-                f'&pound;{abs(net):.2f}{settled}</div>'
-                f'<div class="cap">{"net income" if net < 0 else "net cost"}'
-                f'{" &middot; " + compare if compare else ""}</div></div>')
+    if export_settling and not import_settling:
+        # A net of import minus an export that has not been published is not
+        # a net of anything. Show the half that IS settled and say so.
+        headline = (f'<div class="money bad"><div class="mbig">'
+                    f'&minus;&pound;{c["import_cost"]:.2f}'
+                    f'<span class="settled">import only</span></div>'
+                    f'<div class="cap">import settled &middot; export still '
+                    f'settling ({exp_pct:.0f}% of half hours)</div></div>')
+    else:
+        headline = (f'<div class="money {"good" if net < 0 else "bad"}">'
+                    f'<div class="mbig">{"+" if net < 0 else "&minus;"}'
+                    f'&pound;{abs(net):.2f}{settled}</div>'
+                    f'<div class="cap">{"net income" if net < 0 else "net cost"}'
+                    f'{" &middot; " + compare if compare else ""}</div></div>')
 
     rows = [
         ("Imported", f"{c['import_kwh']:.2f} kWh",
@@ -1864,8 +1893,11 @@ def money_block(c: dict, expected_half_hours: int) -> str:
          f"@ {c['off_peak_p']:.2f}p", ""),
         ("&nbsp;&nbsp;at peak", f"{c['peak_kwh']:.2f} kWh",
          f"@ {c['peak_p']:.3f}p", ""),
-        ("Exported", f"{c['export_kwh']:.2f} kWh",
-         f"+&pound;{c['export_income']:.2f}", "good"),
+        ("Exported" + (" so far" if export_settling else ""),
+         f"{c['export_kwh']:.2f} kWh",
+         f"+&pound;{c['export_income']:.2f}"
+         + (f' <span class="settled">{exp_pct:.0f}% settled</span>'
+            if export_settling else ""), "good"),
     ]
     if c.get("export_unpriced_kwh"):
         rows.append(("&nbsp;&nbsp;unpriced",
