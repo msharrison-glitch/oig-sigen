@@ -750,7 +750,27 @@ def bar(value, peak, tone) -> str:
             f'class="t-{tone}"></i></div>')
 
 
-def flow_rows(sigen: dict, zappi=None) -> str:
+def metered_circuits(shellys) -> float:
+    """Live watts across the WHOLE-CIRCUIT meters only, in kW.
+
+    Deliberately not every Shelly: the plugs measure single appliances that
+    sit downstream of a circuit the Pro 3EM already meters, so adding them
+    would count the same watts twice. This is a floor on house load -- what
+    we can see -- never a total.
+    """
+    total = 0.0
+    seen = False
+    for device in shellys or []:
+        if device.get("error"):
+            continue
+        for channel in device.get("channels") or []:
+            if channel["kind"] == "meter" and channel.get("watts") is not None:
+                total += channel["watts"]
+                seen = True
+    return total / 1000.0 if seen else None
+
+
+def flow_rows(sigen: dict, zappi=None, shellys=None) -> str:
     """The four quantities that make up the house's energy balance.
 
     Shown as proportional bars against the largest of them, because the point
@@ -764,7 +784,13 @@ def flow_rows(sigen: dict, zappi=None) -> str:
     rows = [
         ("Solar", sigen.get("solar"), "solar",
          "generating" if (sigen.get("solar") or 0) > 0.01 else "dark"),
-        ("House", sigen.get("load"), "house", ""),
+        # The Sigen's load figure is DERIVED -- solar minus battery minus grid
+        # -- so the inverter's own conversion losses are inside it. The
+        # bracket is what the circuit meters actually see, and the gap between
+        # the two is losses plus whatever circuits are not metered.
+        ("House", sigen.get("load"), "house",
+         (lambda m: f"({m:.2f} kW metered)" if m is not None else "")(
+             metered_circuits(shellys))),
         ("Battery", abs(battery) if battery is not None else None, "batt",
          "charging" if (battery or 0) > 0.01 else
          ("discharging" if (battery or 0) < -0.01 else "idle")),
@@ -1373,7 +1399,7 @@ footer code {{ font-size:.95em; }}
   <div>
     <div class="panel">
       <h2>Now</h2>
-      {flow_rows(sigen, snap.get("zappi"))}
+      {flow_rows(sigen, snap.get("zappi"), snap.get("shellys"))}
       {heatpump_row(snap.get("heatpump") or {})}
     </div>
     <div class="panel">

@@ -370,6 +370,43 @@ def main() -> int:
           "4.49p" in dashboard.hero({"sigen": {}, "tariff_soc": cheap,
                                      "agent": {"bonus": None}}), True)
 
+    print("\nHouse load is derived, so the metered circuits sit beside it")
+    # The Sigen's load figure is solar - battery - grid, so the inverter's
+    # conversion losses are inside it. Measured 2026-09-20: ~93% battery
+    # round trip against 78-85% at the grid, so the gap is real money.
+    circuits = [
+        {"host": "3em", "channels": [
+            {"id": "em1:0", "kind": "meter", "watts": -5.6},
+            {"id": "em1:1", "kind": "meter", "watts": 14.8},
+            {"id": "em1:2", "kind": "meter", "watts": 300.0}]},
+        # A PLUG, which sits downstream of a circuit the 3EM already meters.
+        # Counting it would count the same watts twice.
+        {"host": "plug", "channels": [
+            {"id": "switch:0", "kind": "switch", "watts": 1771.7}]},
+        {"host": "dead", "error": "URLError", "channels": []},
+    ]
+    check("only whole-circuit meters are summed",
+          round(dashboard.metered_circuits(circuits), 4), 0.3092)
+    check("a dead device does not zero the total",
+          dashboard.metered_circuits(circuits) > 0, True)
+    check("no meters at all gives no figure, not a false zero",
+          dashboard.metered_circuits([{"host": "p", "channels": [
+              {"id": "switch:0", "kind": "switch", "watts": 40.0}]}]), None)
+    check("and no devices at all is None too",
+          dashboard.metered_circuits([]), None)
+
+    house_row = dashboard.flow_rows(
+        {"solar": 0.1, "load": 1.17, "battery": 10.2, "grid": -11.4},
+        None, circuits)
+    check("the derived figure is still the headline", "1.17 kW" in house_row,
+          True)
+    check("with the metered figure beside it",
+          "(0.31 kW metered)" in house_row, True)
+    check("and nothing is claimed when no meter answers",
+          "metered)" in dashboard.flow_rows(
+              {"solar": 0.1, "load": 1.17, "battery": 10.2, "grid": -11.4},
+              None, []), False)
+
     print("\nHeat pump temperatures, from the snapshot and not from Daikin")
     # The API budget is 200 requests a day and the token lives on the polling
     # host. The dashboard reads the record daikin.py already wrote; a second
