@@ -55,7 +55,7 @@ from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import heatreport
-from config import load_env, ConfigError, state_path
+from config import load_env, log_files, ConfigError, state_path
 
 # A Shelly with eco_mode on sleeps its wifi hard and takes a full 2 s to
 # answer the first request -- measured on two Plus Plugs from the NAS. Five
@@ -551,8 +551,16 @@ def read_agent(log_path: str, state_file=None) -> dict:
                     and now - _agent_cache["at"] < AGENT_TTL):
                 return _agent_cache["value"]
         # Only the tail: the log grows forever and the whole file is not
-        # needed for six slots and today's dispatch periods.
-        lines = tail_lines(log_path)
+        # needed for six slots and today's dispatch periods. Spanning the
+        # archives matters on the 1st of the month: the morning after a
+        # rotation the live file holds minutes, and a page showing no slots
+        # at all would look like an agent that had stopped.
+        lines = []
+        for path in reversed(log_files(log_path)):
+            lines = tail_lines(path, max_lines=AGENT_TAIL_LINES
+                               - len(lines)) + lines
+            if len(lines) >= AGENT_TAIL_LINES:
+                break
     except OSError as exc:
         out["error"] = f"{type(exc).__name__}"
         return out

@@ -448,6 +448,36 @@ def main() -> int:
     check("a short file is returned whole",
           len(dashboard.tail_lines(str(small), max_bytes=10 ** 6)), 3)
 
+    print("\nRotation must not hide the history the page is showing")
+    # rotate-log.sh copies observe.log to observe-YYYY-MM-DD.log and truncates
+    # the original, so on the morning of the 1st the live file holds minutes.
+    # Reading it alone would show no slots at all -- indistinguishable from an
+    # agent that had stopped.
+    rot = _d / "rot"
+    rot.mkdir(exist_ok=True)
+    (rot / "observe-2026-09-01.log").write_text(
+        "2026-08-30 20:00:00 INFO    SOC 10.0% -> STARTED charging\n"
+        "2026-08-30 20:30:00 INFO    SOC 30.0% -> RELEASED\n")
+    (rot / "observe.log").write_text(
+        "2026-09-01 07:00:00 INFO    SOC 50.0%  grid +0.10 kW -> idle\n")
+    import config
+    found = config.log_files(str(rot / "observe.log"))
+    check("the archive is found", len(found), 2)
+    check("and comes first, oldest first",
+          found[0].endswith("observe-2026-09-01.log"), True)
+    after = dashboard.read_agent(str(rot / "observe.log"),
+                                 state_file=str(_d / "absent.json"))
+    check("the slot from before the rotation survives",
+          len(after["slots"]), 1)
+    check("with its real times",
+          (after["slots"][0]["start"], after["slots"][0]["end"]),
+          (dt.datetime(2026, 8, 30, 20, 0), dt.datetime(2026, 8, 30, 20, 30)))
+    check("and the current file still supplies the latest tick",
+          after["last_seen"], dt.datetime(2026, 9, 1, 7, 0))
+    check("a log with no archives is unaffected",
+          len(config.log_files(str(log))), 1)
+    dashboard._agent_cache.update(at=None, key=None, value=None)
+
     print("\nParsing is cached, but never across different agents")
     dashboard._agent_cache.update(at=None, key=None, value=None)
     first = dashboard.read_agent(str(log), state_file=str(fresh))

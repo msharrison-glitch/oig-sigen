@@ -143,3 +143,25 @@ def resolve_host(explicit: str | None) -> str:
             "192.168.1.100"
         )
     return host
+
+
+def log_files(path) -> list:
+    """The agent log plus its rotated archives, OLDEST FIRST.
+
+    `deploy/synology/rotate-log.sh` copies observe.log to
+    observe-YYYY-MM-DD.log and truncates the original in place, so after the
+    first rotation the current file holds only this month and everything
+    before it lives in archives. Anything that reads history -- costs.py,
+    heatreport.py, the dashboard -- has to read both or it silently loses
+    every slot older than the last rotation.
+
+    The archive suffix is the DATE OF ROTATION, not a claim about the months
+    inside: the first rotation of an existing log carries whatever was
+    already there. Names sort chronologically, which is why they sort here.
+    """
+    p = Path(path)
+    pattern = f"{p.stem}-[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]{p.suffix}"
+    files = sorted(str(a) for a in p.parent.glob(pattern))
+    if p.exists():
+        files.append(str(p))
+    return files

@@ -211,6 +211,38 @@ half-running: without the guard, `sed` would fail, `set -e` would exit, and
 *both deadmen at the end of the script would never run* — every five minutes,
 indefinitely, while the task itself looked fine.
 
+## Rotating the log
+
+`observe.log` grows forever: 600-1200 lines a day, and it is read whole by
+`costs.py` and `heatreport.py` every time they run. `rotate-log.sh` copies it
+to `observe-YYYY-MM-DD.log` and empties the original.
+
+Task Scheduler, **user-defined script as the owner**, daily — the script
+itself does nothing on any day but the 1st, which is more reliable than
+trusting a monthly trigger to fire:
+
+```sh
+sh ~/oig-sigen/rotate-log.sh          # FORCE=1 to rotate now
+```
+
+**It copies and truncates rather than renaming, and that is the whole
+point.** The agent holds the file open through a `logging.FileHandler`.
+Renaming leaves it writing into a file nobody reads again until it restarts,
+and restarting it mid-slot is what this project avoids everywhere else.
+Truncating in place is safe because that handle is append-mode: the next
+write lands at byte 0 with no sparse hole. Verified 2026-09-21 against a real
+`FileHandler`.
+
+It refuses to truncate if the copy came out short, and it will not rotate a
+log under 100 lines or rotate twice in a day.
+
+**Nothing is ever deleted.** A year is a few tens of megabytes, and this log
+is the only durable record of which half hours were bonus slots: Octopus
+keeps `completedDispatches` for hours, and Sigen never knew they existed.
+`config.log_files()` globs the archives back in, oldest first, so the
+dashboard, `costs.py` and `heatreport.py` keep their history across a
+rotation.
+
 ## Optional: the energy dashboard
 
 `dashboard-start.sh` runs `dashboard.py --serve` on port 8099 and publishes it

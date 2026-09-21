@@ -34,7 +34,7 @@ import json
 import re
 import sys
 
-from config import state_path
+from config import log_files, state_path
 
 HISTORY_FILE = ".daikin-history.jsonl"
 CONSUMPTION_FILE = ".daikin-consumption.json"
@@ -230,11 +230,15 @@ def main() -> int:
     args = parser.parse_args()
 
     history = load_history(args.history)
-    try:
-        lines = io.open(args.log, encoding="utf-8", errors="replace")
-    except FileNotFoundError:
+    lines = []
+    for path in log_files(args.log):
+        try:
+            lines += io.open(path, encoding="utf-8",
+                             errors="replace").readlines()
+        except OSError:
+            continue
+    if not lines:
         print(f"no agent log at {args.log}", file=sys.stderr)
-        lines = []
     slots = parse_slots(lines)
 
     print("\nHeat pump observations")

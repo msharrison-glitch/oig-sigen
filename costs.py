@@ -58,7 +58,7 @@ import sys
 import urllib.parse
 import urllib.request
 
-from config import ConfigError, load_env
+from config import ConfigError, load_env, log_files
 
 API = "https://api.octopus.energy/v1"
 TIMEOUT = 30.0
@@ -325,10 +325,15 @@ def report(start_date, end_date, log_path="observe.log") -> dict:
                                points["export"]["serials"], start, end, key)
         rates = agile_rates(points["export"]["tariff"], start, end, key)
 
-    try:
-        lines = io.open(log_path, encoding="utf-8", errors="replace").readlines()
-    except OSError:
-        lines = []
+    # Archives too: a rotated log would otherwise lose every dispatch older
+    # than the last rotation, and price those half hours at PEAK.
+    lines = []
+    for path in log_files(log_path):
+        try:
+            lines += io.open(path, encoding="utf-8",
+                             errors="replace").readlines()
+        except OSError:
+            continue
     windows = dispatch_windows(lines)
 
     out = summarise(imported, exported, rates, windows, off_p, peak_p)
