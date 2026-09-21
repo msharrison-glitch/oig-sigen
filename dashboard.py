@@ -1196,8 +1196,14 @@ def hero(snap: dict) -> str:
             cheap, sub = True, "off-peak · bonus slot"
         elif not cheap and bonus == "unconfirmed":
             sub = "bonus slot planned, unconfirmed"
-        cards.append((f"{price:.2f}p", "import now",
-                      "cheap" if cheap else "peak", sub))
+        # The import rate gets NO card of its own, by choice: it is peak for
+        # most of the day and says nothing then. It still has to be computed,
+        # because the export card's SPREAD is measured against it, and that
+        # spread is what actually decides whether to buy -- including the
+        # bonus-slot correction above, without which the spread would be
+        # measured against Sigen's 29.76p while the agent charged at 4.49p.
+        # The import price remains on the Today chart and in the money
+        # figures on the report pages.
 
     sell = (tariff.get("SELL_TARIFF") or [])
     if sell and not tariff.get("error"):

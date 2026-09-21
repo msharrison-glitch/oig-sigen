@@ -354,8 +354,12 @@ def main() -> int:
     both = {"BUY_TARIFF": [(_ago(60), 0.29757), (_ago(5), 0.29757)],
             "SELL_TARIFF": [(_ago(60), 0.1694), (_ago(5), 0.1694)]}
     cards = dashboard.hero({"sigen": {"soc": 50.0}, "tariff_soc": both})
-    check("the import price appears", "29.76p" in cards, True)
-    check("the export price appears beside it", "16.94p" in cards, True)
+    # The import rate has no card of its own -- it is peak most of the day
+    # and says nothing then. It still drives the SPREAD, which is the number
+    # that decides anything, so it must not disappear from the arithmetic.
+    check("the import rate gets no headline card",
+          "import now" in cards, False)
+    check("the export price is shown", "16.94p" in cards, True)
     # Buying at 29.76 to sell at 16.94 loses money; the sign must say so.
     check("and the spread is signed, showing the loss",
           "-12.82p" in cards, True)
@@ -381,21 +385,18 @@ def main() -> int:
     def card(bonus):
         return dashboard.hero({"sigen": {}, "tariff_soc": peak,
                                "agent": {"bonus": bonus}, "off_peak_p": 4.49})
-    charging = card("charging")
-    check("charging a slot shows off-peak", "4.49p" in charging, True)
-    check("and says why", "bonus slot" in charging, True)
-    check("and the spread follows the real price", "+12.45p" in charging, True)
-    check("a confirmed slot at target is still off-peak",
-          "4.49p" in card("confirmed"), True)
-    unconfirmed = card("unconfirmed")
-    # Planned but the car never drew: that bills at PEAK. Showing 4.49p here
-    # would be the exact mistake the agent is built to avoid.
-    check("an unconfirmed slot stays at peak", "29.76p" in unconfirmed, True)
-    check("and says it is unconfirmed", "unconfirmed" in unconfirmed, True)
-    check("no slot is peak rate", "peak rate" in card(None), True)
-    check("the guaranteed window is untouched by the override",
-          "4.49p" in dashboard.hero({"sigen": {}, "tariff_soc": cheap,
-                                     "agent": {"bonus": None}}), True)
+    # With no import card, the bonus correction shows up in the SPREAD: a
+    # slot charging at 4.49p against 16.94p export is +12.45p, where Sigen's
+    # own 29.76p would have said -12.82p and called the night a loss.
+    check("charging a slot prices the spread at the off-peak rate",
+          "+12.45p" in card("charging"), True)
+    check("a confirmed slot at target too",
+          "+12.45p" in card("confirmed"), True)
+    # Planned but the car never drew: that bills at PEAK. Pricing it at
+    # 4.49p would be the exact mistake the agent is built to avoid.
+    check("an unconfirmed slot stays at the peak rate",
+          "-12.82p" in card("unconfirmed"), True)
+    check("and so does no slot at all", "-12.82p" in card(None), True)
 
     print("\nThe headline cards must not contradict the rows below them")
     # Seen on the phone, 2026-09-20 13:35: "0.0 kW import / importing" with
