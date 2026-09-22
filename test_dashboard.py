@@ -289,10 +289,14 @@ def main() -> int:
     barely = dict(good, half_hours=9)
     early = dashboard.money_block(barely, 96)
     check("under a quarter settled shows no headline figure",
-          "Settling" in early, True)
+          "Not settled yet" in early, True)
     check("and says how little has arrived", "9%" in early, True)
-    check("but still shows what HAS settled, labelled 'so far'",
-          "Exported so far" in early, True)
+    # Changed 2026-09-22: a series under a quarter settled now shows nothing
+    # at all rather than a partial figure. Measured lags are 14 h for import
+    # and 38 h for export, so "today" can never be a small version of the
+    # truth -- it is a different number.
+    check("and a barely-settled series claims nothing",
+          "not published yet" in early, True)
     check("and points at the plant figures instead",
           "Plant figures below" in early, True)
 
@@ -323,8 +327,8 @@ def main() -> int:
                "net": 2.1913, "half_hours": 49, "import_half_hours": 49,
                "export_half_hours": 2, "off_peak_p": 4.49, "peak_p": 29.757}
     late = dashboard.money_block(lagging, 48)
-    check("the export row says it is still settling",
-          "Exported so far" in late and "4% settled" in late, True)
+    check("an export at 4% is reported as unpublished, not as zero",
+          "not published yet" in late and "+&pound;0.00" not in late, True)
     check("and the reason is given", "Export settles later" in late, True)
     # A net of import minus an export nobody has published is not a net.
     check("the headline does not present a net", "net cost" in late, False)
@@ -332,6 +336,23 @@ def main() -> int:
           "import only" in late and "2.19" in late, True)
     # 49 half hours against an expected 48 must not read as "102% settled".
     check("coverage is capped at 100%", "102%" in late, False)
+
+    # MEASURED 2026-09-22: import lags 13.9 h, export 37.9 h. Today held 2 of
+    # 48 import half hours and 0 export. A figure built from 4% of a day is
+    # not a small version of the truth -- 11.27 kWh against the plant's own
+    # 39.47 -- and the owner reasonably read the zero as "earned nothing"
+    # while 23.33 kWh of export sat further down the same page.
+    today = {"import_kwh": 11.27, "cheap_kwh": 11.27, "peak_kwh": 0.0,
+             "import_cost": 0.51, "export_kwh": 0.0, "export_income": 0.0,
+             "net": 0.51, "half_hours": 2, "import_half_hours": 2,
+             "export_half_hours": 0, "off_peak_p": 4.49, "peak_p": 29.757}
+    early = dashboard.money_block(today, 48)
+    check("an unsettled day claims no numbers at all",
+          "11.27" in early or "0.00" in early, False)
+    check("both lines say so", early.count("not published yet"), 2)
+    check("and the real lag is stated", "about 38" in early, True)
+    check("the headline does not imply a figure",
+          "Not settled yet" in early, True)
 
     settled_both = dict(lagging, export_kwh=40.0, export_income=7.20,
                         net=-5.01, export_half_hours=48)

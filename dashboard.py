@@ -1888,6 +1888,42 @@ def money_block(c: dict, expected_half_hours: int) -> str:
     pct_settled = (100.0 * got / expected_half_hours
                    if expected_half_hours else 0.0)
 
+    # THE TWO SERIES SETTLE AT DIFFERENT SPEEDS, and judging them together
+    # hides the case that matters. Observed 2026-09-20: import for the 19th
+    # was complete (49 half hours) while export stopped at 00:30 that day (2
+    # half hours), so the day looked fully settled and the page printed
+    # "+GBP 0.00" of export income beside the plant's own record of a day's
+    # worth of export. The energy was sold; Octopus had not published it yet.
+    #
+    # Capped: a day can return 49 half hours at a clock change, or simply an
+    # extra boundary row, and "102% settled" reads like a bug.
+    expected = expected_half_hours or 1
+    imp_pct = min(100.0, 100.0 * (c.get("import_half_hours") or 0) / expected)
+    exp_pct = min(100.0, 100.0 * (c.get("export_half_hours") or 0) / expected)
+    export_settling = exp_pct < 90 and c.get("export_half_hours") is not None
+    import_settling = imp_pct < 90 and c.get("import_half_hours") is not None
+
+    def amount_for(kind, pct, kwh_value, money_value, sign):
+        """kWh and money for one series, or a plain statement that it is late.
+
+        MEASURED 2026-09-22: import lags 13.9 h and export 37.9 h. Today held
+        2 of 48 import half hours and 0 export; yesterday 48 import and 2
+        export. So neither series settles the same day, and export does not
+        settle the next one either.
+
+        A number built from 4% of a day is not a small version of the truth,
+        it is a different number -- 11.27 kWh against the plant's own 39.47 --
+        and a 0.00 is a claim that nothing was earned. Below a quarter of the
+        period, say it is not published instead.
+        """
+        if pct < 25:
+            return (kind, "&mdash;", "not published yet")
+        return (f"{kind} so far" if pct < 90 else kind,
+                f"{kwh_value:.2f} kWh",
+                f"{sign}&pound;{money_value:.2f}"
+                + (f' <span class="settled">{pct:.0f}% settled</span>'
+                   if pct < 90 else ""))
+
     # Below this, the figures cover so little of the period that showing them
     # as a headline invites a comparison they cannot survive -- the owner
     # reasonably read "+GBP 0.68" against 40 kWh of plant-measured export and
@@ -1895,19 +1931,20 @@ def money_block(c: dict, expected_half_hours: int) -> str:
     if pct_settled < 25:
         rows = "".join(
             f'<div class="mrow"><div class="label">{name}</div>'
-            f'<div class="value">{kwh}</div>'
+            f'<div class="value">{kwh_text}</div>'
             f'<div class="value">{amount}</div></div>'
-            for name, kwh, amount in (
-                ("Imported so far", f"{c['import_kwh']:.2f} kWh",
-                 f"&minus;&pound;{c['import_cost']:.2f}"),
-                ("Exported so far", f"{c['export_kwh']:.2f} kWh",
-                 f"+&pound;{c['export_income']:.2f}")))
-        return (f'<div class="money"><div class="mbig settling">Settling'
-                f'</div><div class="cap">only {pct_settled:.0f}% of this '
-                f'period has reached the meter yet</div></div>{rows}'
-                f'<p class="empty">Octopus publishes meter readings about a '
-                f'day late. Totals here will keep rising; compare the Plant '
-                f'figures below for what actually happened.</p>')
+            for name, kwh_text, amount in (
+                amount_for("Imported", imp_pct, c["import_kwh"],
+                           c["import_cost"], "&minus;"),
+                amount_for("Exported", exp_pct, c["export_kwh"],
+                           c["export_income"], "+")))
+        return (f'<div class="money"><div class="mbig settling">Not settled '
+                f'yet</div><div class="cap">{pct_settled:.0f}% of this period '
+                f'has reached the meter</div></div>{rows}'
+                f'<p class="empty">Measured lag: import about 14 hours, '
+                f'export about 38, so a day is only fully priced two days '
+                f'later. An empty line here means unpublished, not unearned '
+                f'&mdash; the Plant figures below are measured now.</p>')
 
     # THE TWO SERIES SETTLE AT DIFFERENT SPEEDS, and judging them together
     # hides the case that matters. Observed 2026-09-20: import for the 19th
@@ -1966,11 +2003,8 @@ def money_block(c: dict, expected_half_hours: int) -> str:
          f"@ {c['off_peak_p']:.2f}p", ""),
         ("&nbsp;&nbsp;at peak", f"{c['peak_kwh']:.2f} kWh",
          f"@ {c['peak_p']:.3f}p", ""),
-        ("Exported" + (" so far" if export_settling else ""),
-         f"{c['export_kwh']:.2f} kWh",
-         f"+&pound;{c['export_income']:.2f}"
-         + (f' <span class="settled">{exp_pct:.0f}% settled</span>'
-            if export_settling else ""), "good"),
+        amount_for("Exported", exp_pct, c["export_kwh"],
+                   c["export_income"], "+") + ("good",),
     ]
     if c.get("export_unpriced_kwh"):
         rows.append(("&nbsp;&nbsp;unpriced",
