@@ -1058,6 +1058,72 @@ def main() -> int:
           "65.84" in bblock and "7.92" in bblock, True)
     check("an unsettled period says so instead of comparing",
           "too little to compare" in dashboard.balance_block(bal2), True)
+
+    print("\n  ...and the hover layer needs no JavaScript")
+    check("every slice carries a tip", bblock.count('class="tip"'),
+          len(bal["ins"]) + len(bal["outs"]))
+    check("the tip shows the composition, not just the total",
+          "57.94 plant CT + 7.90 car" in bblock, True)
+    check("reachable by keyboard and by tap, where :hover never fires",
+          bblock.count('tabindex="0"'), len(bal["ins"]) + len(bal["outs"]))
+    check("and screen readers get it as one flat string",
+          'aria-label="Grid import: 65.84 kWh, 49.0%' in bblock, True)
+    check("no script tag sneaks in with it", "<script" in bblock, False)
+
+    print("\n  ...and the palette is the validated one, in both pages")
+    for token, hexval in (("--solar", "#bb8726"), ("--house", "#566370"),
+                          ("--batt", "#cf4c95"), ("--grid", "#3f86cf"),
+                          ("--ev", "#4f9e33"), ("--circuit", "#1f918a")):
+        check(f"live page defines {token}", f"{token}:{hexval}" in html, True)
+    # The pair that failed: grid blue and battery purple were dE 1.3 apart for
+    # deuteranopia, and both appear in the flow rows.
+    check("the colourblind-unsafe grid blue is gone", "#5aa8e8" in html, False)
+    check("and so is the purple it collided with", "#a98be0" in html, False)
+    check("and the slate that matched house for NORMAL vision",
+          "#5f8fa8" in html, False)
+    # One constant, both pages -- so the claim that they cannot drift apart is
+    # enforced by the code rather than asserted in a comment.
+    report_html = dashboard.render_report(dict(
+        REAL, period="yesterday", label="Yesterday", kind="day",
+        start=dt.date(2026, 9, 22), end=dt.date(2026, 9, 22),
+        labels={}, em={}, plugs={}, recording_since=None,
+        daikin={"error": "none"},
+        costs=dict(REAL["costs"], import_cost=8.38, export_income=14.00,
+                   net=5.62, cheap_kwh=48.37, peak_kwh=20.85))).decode()
+    check("the live page uses the shared palette constant",
+          dashboard.SERIES_COLOURS in html, True)
+    check("and so does the report page",
+          dashboard.SERIES_COLOURS in report_html, True)
+    check("the report page renders the hover layer too",
+          'class="tip"' in report_html, True)
+
+    print("\nCircuits read alphabetically, by label rather than wiring order")
+    order = dashboard.shelly_rows([
+        {"host": "h1", "channels": [
+            {"id": "em1:0", "kind": "meter", "watts": 100.0},
+            {"id": "em1:1", "kind": "meter", "watts": 200.0},
+            {"id": "em1:2", "kind": "meter", "watts": 300.0}]}],
+        {"h1": {"em1:0": "Upstairs", "em1:1": "Alarm", "em1:2": "kitchen"}})
+    seen = re.findall(r'class="cname">([^<]+)<', order)
+    check("live page sorts by name, not channel id", seen,
+          ["Alarm", "kitchen", "Upstairs"])
+
+    # The report page merges meters and plugs: two separately sorted runs in
+    # one table reads as unsorted.
+    mixed = dashboard.render_report(dict(
+        REAL, period="yesterday", label="Yesterday", kind="day",
+        start=dt.date(2026, 9, 22), end=dt.date(2026, 9, 22),
+        labels={"h1": {"em1:0": "Zappi feed", "em1:1": "Boiler"},
+                "h2": "Freezer"},
+        em={"em1:0": 3.0, "em1:1": 4.0},
+        plugs={("h2", "switch:0"): 1.0},
+        recording_since=None, daikin={"error": "none"},
+        costs=dict(REAL["costs"], import_cost=8.38, export_income=14.00,
+                   net=5.62, cheap_kwh=48.37, peak_kwh=20.85))).decode()
+    body = mixed[mixed.index("<h2>Circuits"):]
+    names = re.findall(r'class="label">([^<]+)<', body)
+    check("report page merges meters and plugs into one sorted run", names,
+          ["Boiler", "Freezer", "Zappi feed"])
     check("no chart still renders prose",
           "not enough" in dashboard.balance_block(None).lower(), True)
     check("the no-car case says why the car is missing",

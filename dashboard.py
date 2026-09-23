@@ -77,6 +77,31 @@ CACHE_SECONDS = 15.0
 # The page refreshes itself; no JS, so this is the only way.
 PAGE_REFRESH_SECONDS = 30
 
+# One definition of the series colours, interpolated into BOTH pages, so the
+# live view and the report pages cannot drift apart. Validated with the dataviz
+# skill's scripts/validate_palette.js against BOTH surfaces -- a single mid-tone
+# set rather than a light/dark pair, because there is then only one thing to
+# keep right. The hue order below is the order `flow_rows` emits, so the pairs a
+# reader actually compares are the adjacent ones the validator checks.
+#
+# What this replaced was a genuine accessibility fault, not a matter of taste:
+#   grid #5aa8e8 vs battery #a98be0   dE 1.3 deuteranopia -- indistinguishable
+#   circuit #5f8fa8 vs house #7f8c94  dE 4.5 NORMAL vision -- no label excuses
+# and both pairs appear together in the flow rows. Now 6.2 and 21.4. A CVD
+# figure in the 6-8 band is legal only alongside secondary encoding, which
+# holds here: every bar sits beside its own text label, and the balance chart
+# repeats every value in its key list.
+#
+# TWO KNOWING EXCEPTIONS, both under the validator's chroma floor. --house is
+# deliberately neutral because it is the aggregate, the "everything else" slot;
+# --circuit sits 4% under. Both are always direct-labelled, so identity is
+# never carried by colour alone. Do not "fix" these by saturating them --
+# re-run the validator first, because raising --house's chroma is what drove
+# the old dE 4.5 collision with --circuit.
+SERIES_COLOURS = ("--solar:#bb8726; --house:#566370; --batt:#cf4c95; "
+                  "--grid:#3f86cf; --ev:#4f9e33; --heat:#8f62c9; "
+                  "--circuit:#1f918a;")
+
 # The report is expensive (a Zappi call per day) and changes slowly.
 REPORT_CACHE_SECONDS = 600.0
 
@@ -942,6 +967,11 @@ def shelly_rows(shellys, labels=None) -> str:
 
     if not live:
         return '<p class="empty">none configured</p>'
+    # Alphabetical by label, not by the order the devices were polled -- that
+    # order is whatever `.env` lists and it shifts when a device is added, so
+    # the rows moved underneath the reader for no reason they could see.
+    # Case-insensitive, name as tiebreak, so it is stable.
+    live.sort(key=lambda r: (str(r[0]).lower(), str(r[0])))
     peak = max([abs(w) for _n, w, _s, _k in live if w] or [1.0])
     out = []
     for name, value, state, _kind in live:
@@ -1302,9 +1332,10 @@ def render(snap: dict) -> bytes:
 <style>
 :root {{
   --bg:#0e1113; --panel:#161a1d; --line:#252b30; --text:#e7ecef;
-  --muted:#8b979e; --solar:#e8b64c; --grid:#5aa8e8; --batt:#a98be0;
-  --house:#7f8c94; --cheap:#3fb98c; --peak:#e0705e; --ev:#5fc9c0;
-  --heat:#e08a5e; --circuit:#5f8fa8;
+  --muted:#8b979e;
+  {SERIES_COLOURS}
+  /* Reserved status colours -- never reuse these for a series. */
+  --cheap:#3fb98c; --peak:#e0705e;
 }}
 @media (prefers-color-scheme: light) {{
   :root {{ --bg:#f6f7f8; --panel:#fff; --line:#e2e6e9; --text:#151a1d;
@@ -2140,13 +2171,17 @@ def balance_block(bal) -> str:
         segs, keys = [], []
         for name, value, tone, detail in items:
             pct = 100.0 * value / bal["total"]
-            tip = f"{name}: {value:.2f} kWh ({pct:.1f}%)"
+            flat = f"{name}: {value:.2f} kWh, {pct:.1f}%"
+            tip = (f'<b>{escape(name)}</b> &middot; {value:.2f} kWh '
+                   f'&middot; {pct:.1f}%')
             if detail:
-                tip += f" = {detail}" if tone == "grid" else f" - {detail}"
-            inner = (f'<span>{value:.1f}</span>'
+                flat += f" ({detail})"
+                tip += f'<br><i>{escape(detail)}</i>'
+            inner = (f'<span class="sv">{value:.1f}</span>'
                      if pct >= BALANCE_LABEL_PCT else "")
             segs.append(f'<div class="seg s-{tone}" style="flex:{value:.4f}" '
-                        f'title="{escape(tip)}">{inner}</div>')
+                        f'tabindex="0" aria-label="{escape(flat)}">{inner}'
+                        f'<span class="tip">{tip}</span></div>')
             keys.append(f'<li><i class="k-{tone}"></i>{escape(name)} '
                         f'<b>{value:.2f}</b> '
                         f'<span class="pc">{pct:.0f}%</span></li>')
@@ -2245,21 +2280,30 @@ def render_report(rep: dict) -> bytes:
             heat += ('<tr><td colspan="2" class="muted">no daily figures '
                      'archived for this period yet</td></tr>')
 
-    circuits = []
-    for channel, value in sorted(rep.get("em", {}).items()):
+    # Alphabetical by the name you actually see, not by the raw channel key --
+    # sorting on the key ordered them by "em1:0", "em1:1", "switch:0", which is
+    # the wiring order and means nothing to a reader. Meters and plugs are
+    # merged into one sequence for the same reason: two separately sorted runs
+    # in one table reads as unsorted. Case-insensitive, with the name as the
+    # tiebreak so the order is stable rather than dependent on dict insertion.
+    named = []
+    for channel, value in (rep.get("em") or {}).items():
         name = channel
-        for host, entry in (rep["labels"] or {}).items():
+        for _host, entry in (rep["labels"] or {}).items():
             if isinstance(entry, dict) and channel in entry:
                 name = entry[channel]
-        circuits.append(f'<tr><td class="label">{escape(name)}</td>'
-                        f'<td class="value">{kwh(value)} kWh</td></tr>')
-    for (host, channel), value in sorted(rep.get("plugs", {}).items()):
+        named.append((str(name), value))
+    for (host, channel), value in (rep.get("plugs") or {}).items():
         entry = (rep["labels"] or {}).get(host)
         name = entry if isinstance(entry, str) else (
             entry.get(channel, f"{host} {channel}")
             if isinstance(entry, dict) else f"{host} {channel}")
-        circuits.append(f'<tr><td class="label">{escape(str(name))}</td>'
-                        f'<td class="value">{kwh(value)} kWh</td></tr>')
+        named.append((str(name), value))
+
+    circuits = [f'<tr><td class="label">{escape(name)}</td>'
+                f'<td class="value">{kwh(value)} kWh</td></tr>'
+                for name, value in sorted(named, key=lambda r: (r[0].lower(),
+                                                                r[0]))]
     since = rep.get("recording_since")
     if not rep.get("plugs"):
         note = ("plug history starts when the recorder does"
@@ -2274,25 +2318,39 @@ def render_report(rep: dict) -> bytes:
 <title>Energy &middot; {escape(rep['label'])}</title>
 <style>
 :root {{ color-scheme: light dark; --line:#8883; --muted:#8886;
-  --solar:#c2870f; --grid:#2f6fb8; --batt:#d81b60; --house:#5f7480;
-  --ev:#4d9e2a; --gap:#9aa7ae; }}
-/* Dark steps are SELECTED, not an automatic flip of the light ones. The hues
-   are the same, lifted to stay inside the lightness band on a dark ground. */
-@media (prefers-color-scheme: dark) {{
-  :root {{ --solar:#e8b64c; --grid:#6aa9e8; --batt:#f2679c; --house:#93a5b0;
-    --ev:#7fc74f; --gap:#69777f; }}
-}}
+  {SERIES_COLOURS} --gap:#8b969d; }}
 body {{ font:15px/1.5 -apple-system, system-ui, sans-serif; margin:0;
         padding:1.2rem; max-width:780px; }}
-.barrow {{ margin:0 0 1.1rem; }}
+/* The hover layer is CSS only. test_dashboard.py fails the build if a
+   <script> tag ever appears on this page, and that rail is worth more than a
+   tooltip library -- the page has to render over an SSH tunnel with nothing
+   installed. The tip is positioned against .barrow rather than the segment it
+   belongs to, because a 2%-wide segment near either end would push a
+   segment-anchored tooltip off the screen at phone width. tabindex makes it
+   reachable by keyboard and by tap, where :hover never fires. */
+.barrow {{ margin:0 0 1.1rem; position:relative; }}
 .cap2 {{ font-size:.68rem; font-weight:700; letter-spacing:.13em;
   text-transform:uppercase; color:var(--muted); margin-bottom:.35rem; }}
 .bar {{ display:flex; gap:2px; height:46px; }}
 .seg {{ border-radius:3px; display:flex; align-items:center;
-  justify-content:center; min-width:0; overflow:hidden; }}
+  justify-content:center; min-width:0; cursor:default; }}
 .seg:first-child {{ border-radius:5px 3px 3px 5px; }}
 .seg:last-child {{ border-radius:3px 5px 5px 3px; }}
-.seg span {{ font-size:12.5px; font-weight:700; color:#fff; padding:0 3px; }}
+.sv {{ font-size:12.5px; font-weight:700; color:#fff; padding:0 3px;
+  overflow:hidden; white-space:nowrap; }}
+.seg:focus {{ outline:2px solid var(--text); outline-offset:2px; }}
+.tip {{ position:absolute; left:50%; bottom:calc(100% + 7px);
+  transform:translateX(-50%) translateY(3px); background:var(--text);
+  color:var(--bg); padding:.42rem .6rem; border-radius:7px; font-size:.78rem;
+  line-height:1.4; text-align:center; width:max-content;
+  max-width:min(17rem, 78vw); opacity:0; pointer-events:none; z-index:6;
+  transition:opacity .12s ease, transform .12s ease;
+  box-shadow:0 3px 10px rgba(0,0,0,.28); }}
+.tip b {{ font-weight:700; }}
+.tip i {{ font-style:normal; opacity:.72; }}
+.seg:hover .tip, .seg:focus .tip {{ opacity:1;
+  transform:translateX(-50%) translateY(0); }}
+@media (hover:none) {{ .tip {{ transition:none; }} }}
 .s-solar {{ background:var(--solar); }} .s-grid {{ background:var(--grid); }}
 .s-batt {{ background:var(--batt); }} .s-house {{ background:var(--house); }}
 .s-ev {{ background:var(--ev); }}
