@@ -961,6 +961,108 @@ def main() -> int:
     check("kW is 2dp", dashboard.kw(1.2345), "1.23 kW")
     check("watts are whole numbers", dashboard.watts(162.24), "162 W")
 
+    print("\nThe whole-property balance")
+    # Real figures, 22 September 2026. The car is the point: the plant CT
+    # reads 57.94 kWh of import and the settlement meter 69.22, because the
+    # Zappi is wired outside that CT by design.
+    REAL = {
+        "sigen": {"FROM_SOLAR": 15.11, "TO_LOAD": 15.67, "FROM_GRID": 57.94,
+                  "TO_GRID": 55.96, "TO_BATTERY": 54.85,
+                  "FROM_BATTERY": 53.43},
+        "costs": {"import_kwh": 69.223, "export_kwh": 57.839,
+                  "import_half_hours": 48, "export_half_hours": 48},
+        "zappi": {"total": 7.91605, "grid": 7.89725, "solar": 0.0188},
+    }
+
+    def names(side):
+        return [n for n, _v, _t, _d in side]
+
+    def value_of(side, want):
+        return dict((n, v) for n, v, _t, _d in side)[want]
+
+    bal = dashboard.balance(REAL, 48)
+    check("the car is drawn", "Car" in names(bal["outs"]), True)
+    check("its grid draw is added to import, which the CT cannot see",
+          round(value_of(bal["ins"], "Grid import"), 3),
+          round(57.94 + 7.89725, 3))
+    check("and its diverted solar comes back off export",
+          round(value_of(bal["outs"], "Grid export"), 4),
+          round(55.96 - 0.0188, 4))
+    check("so the two bars close exactly",
+          abs(bal["gap"]) < dashboard.BALANCE_MIN_GAP, True)
+    check("both bars total the same",
+          round(sum(v for _, v, _t, _d in bal["ins"]), 6),
+          round(sum(v for _, v, _t, _d in bal["outs"]), 6))
+    check("segment widths sum to the bar total",
+          round(sum(v for _, v, _t, _d in bal["outs"]), 6),
+          round(bal["total"], 6))
+
+    print("\n  ...and settlement coverage can never change a bar")
+    # THE REGRESSION TEST. Drawing a part-published grid leg against fully
+    # published solar and battery figures turned the unsettled tail into a
+    # fake 14% "unaccounted" slice on Today, Last 7 days and This month.
+    today = dict(REAL, costs=dict(REAL["costs"], import_half_hours=2,
+                                  export_half_hours=2))
+    bal2 = dashboard.balance(today, 48)
+    check("an unsettled period still draws the car",
+          "Car" in names(bal2["outs"]), True)
+    check("with identical widths to the settled case",
+          [round(v, 6) for _n, v, _t, _d in bal2["outs"]],
+          [round(v, 6) for _n, v, _t, _d in bal["outs"]])
+    check("and invents no residual", abs(bal2["gap"]) < 0.0001, True)
+    check("the cross-check knows it cannot compare",
+          bal2["settle"]["complete"], False)
+
+    print("\n  ...and impossible widths are clamped, not drawn")
+    # A self-consistent plant set whose export (0.5) is SMALLER than what the
+    # Zappi says it diverted (3.0). Subtracting one from the other would give
+    # a negative bar width, so it clamps at zero and the 2.5 kWh it could not
+    # take becomes the residual rather than silently vanishing.
+    sunny = dict(REAL,
+                 sigen=dict(REAL["sigen"], TO_GRID=0.5, TO_LOAD=71.13),
+                 zappi=dict(REAL["zappi"], solar=3.0, total=10.89725))
+    bal3 = dashboard.balance(sunny, 48)
+    check("diverted solar above export cannot go negative",
+          value_of(bal3["outs"], "Grid export"), 0.0)
+    check("and the clamped energy shows up as a residual",
+          "Unaccounted" in names(bal3["ins"]), True)
+    check("of exactly the amount the clamp could not take",
+          round(value_of(bal3["ins"], "Unaccounted"), 4), 2.5)
+
+    heavy = dict(REAL, sigen=dict(REAL["sigen"], TO_LOAD=40.0))
+    bal4 = dashboard.balance(heavy, 48)
+    check("a shortfall goes on the side that is short",
+          "Unaccounted" in names(bal4["ins"]), True)
+    check("never onto the other bar as a negative width",
+          "Unaccounted" in names(bal4["outs"]), False)
+
+    nocar = dict(REAL, zappi={"error": "myenergi unreachable"})
+    bal5 = dashboard.balance(nocar, 48)
+    check("no Zappi reading -> no Car slice", "Car" in names(bal5["outs"]),
+          False)
+    check("and the plant's own figures still close",
+          abs(bal5["gap"]) < dashboard.BALANCE_MIN_GAP, True)
+
+    check("an unavailable plant means no chart, not a crash",
+          dashboard.balance({"sigen": {"error": "ConfigError"}}, 48), None)
+    check("missing keys mean no chart",
+          dashboard.balance({"sigen": {"FROM_SOLAR": 1.0}}, 48), None)
+    check("an empty report means no chart", dashboard.balance({}, 48), None)
+
+    bblock = dashboard.balance_block(bal)
+    check("the grid legs are never described as the settlement meter",
+          "Grid figures are Octopus" in bblock, False)
+    check("settlement appears only as a cross-check",
+          "Cross-check" in bblock, True)
+    check("every figure appears as text too, not colour alone",
+          "65.84" in bblock and "7.92" in bblock, True)
+    check("an unsettled period says so instead of comparing",
+          "too little to compare" in dashboard.balance_block(bal2), True)
+    check("no chart still renders prose",
+          "not enough" in dashboard.balance_block(None).lower(), True)
+    check("the no-car case says why the car is missing",
+          "outside that CT" in dashboard.balance_block(bal5), True)
+
     print("\nThe page is self-contained -- it has to work over an SSH tunnel")
     check("no external scripts", "<script" in html, False)
     check("no CDN references", "http://" in html.replace("http-equiv", ""), False)

@@ -2028,6 +2028,173 @@ def money_block(c: dict, expected_half_hours: int) -> str:
         + note)
 
 
+# The balance chart draws the WHOLE PROPERTY from two instruments that
+# together cover it exactly: the plant's own CT, and the Zappi's meter.
+#
+# The correction is the whole trick. The charger is wired OUTSIDE the plant CT
+# by design, so that CT understates import by whatever the car drew, and
+# overstates export by the solar the Zappi diverted into the car -- it saw that
+# energy leave and assumed it went to the grid. Put both back:
+#
+#     grid_in  = FROM_GRID + zappi.grid
+#     grid_out = TO_GRID   - zappi.solar
+#
+# and the residual collapses to (FROM_SOLAR + FROM_GRID + FROM_BATTERY) -
+# (TO_LOAD + TO_GRID + TO_BATTERY), which is zero because TO_LOAD is itself
+# derived from the other three. So the bars close exactly, on every period,
+# with the car included and no coverage arithmetic anywhere.
+#
+# OCTOPUS'S SETTLEMENT METER IS A CROSS-CHECK SENTENCE, NEVER A BAR WIDTH, and
+# that is a correction of a real bug rather than a preference. It lags, so its
+# coverage runs behind the plant's: measured 2026-09-23, 100% for Yesterday and
+# Last month but 86% for Last 7 days and 96% for This month. Drawing a
+# part-published grid leg against fully-published solar and battery figures
+# turned the unsettled tail into a 14% "unaccounted" slice -- inventing a
+# missing flow on three of the five tabs. Coverage may gate a sentence; it must
+# never gate a width.
+#
+# The residual is still drawn when it appears, rather than absorbed into the
+# house figure. House is the one quantity here that is derived rather than
+# measured, and quietly parking an error inside it is exactly how `loadPower`
+# came to be believed for months.
+BALANCE_MIN_GAP = 0.05           # kWh; below this the residual is not drawn
+BALANCE_LABEL_PCT = 4.0          # narrower slices carry no inline number
+BALANCE_SETTLED_PCT = 99.0       # below this the cross-check prints no numbers
+
+
+def balance(rep: dict, expected_half_hours: int):
+    """Whole-property energy balance, or None if it cannot be drawn."""
+    s = rep.get("sigen") or {}
+    if s.get("error"):
+        return None
+    need = ("FROM_SOLAR", "TO_LOAD", "FROM_GRID", "TO_GRID",
+            "TO_BATTERY", "FROM_BATTERY")
+    if any(not isinstance(s.get(k), (int, float)) for k in need):
+        return None
+
+    z = rep.get("zappi") or {}
+    car_grid, car_solar, car_total = None, None, None
+    if not z.get("error"):
+        car_grid, car_solar, car_total = z.get("grid"), z.get("solar"), z.get("total")
+    has_car = all(isinstance(v, (int, float))
+                  for v in (car_grid, car_solar, car_total))
+
+    grid_in, grid_out = float(s["FROM_GRID"]), float(s["TO_GRID"])
+    in_detail = f"{grid_in:.2f} plant CT"
+    out_detail = f"{grid_out:.2f} plant CT"
+    if has_car:
+        in_detail += f" + {float(car_grid):.2f} car"
+        out_detail += f" less {float(car_solar):.2f} diverted to the car"
+        grid_in += float(car_grid)
+        # Clamped: on a low-export day the diverted figure can exceed the
+        # plant's export, and a negative bar width is nonsense. Whatever the
+        # clamp swallows reappears in the residual, which is the point of it.
+        grid_out = max(0.0, grid_out - float(car_solar))
+
+    ins = [("Solar", float(s["FROM_SOLAR"]), "solar", None),
+           ("Grid import", grid_in, "grid", in_detail),
+           ("Battery", float(s["FROM_BATTERY"]), "batt", None)]
+    outs = [("House", float(s["TO_LOAD"]), "house", None)]
+    if has_car:
+        outs.append(("Car", float(car_total), "ev",
+                     f"{float(car_grid):.2f} from grid, "
+                     f"{float(car_solar):.2f} diverted solar"))
+    outs.append(("Grid export", grid_out, "grid", out_detail))
+    outs.append(("Battery", float(s["TO_BATTERY"]), "batt", None))
+
+    gap = sum(v for _, v, _, _ in ins) - sum(v for _, v, _, _ in outs)
+    if gap > BALANCE_MIN_GAP:
+        outs.append(("Unaccounted", gap, "gap", None))
+    elif gap < -BALANCE_MIN_GAP:
+        ins.append(("Unaccounted", -gap, "gap", None))
+
+    total = max(sum(v for _, v, _, _ in ins), sum(v for _, v, _, _ in outs))
+    if total <= 0:
+        return None
+
+    c = rep.get("costs") or {}
+    expected = max(1, expected_half_hours)
+    pct = min(100.0, 100.0 * min(c.get("import_half_hours") or 0,
+                                 c.get("export_half_hours") or 0) / expected)
+    settle = None
+    if isinstance(c.get("import_kwh"), (int, float)):
+        settle = {"pct": pct, "complete": pct >= BALANCE_SETTLED_PCT,
+                  "import_kwh": c.get("import_kwh"),
+                  "export_kwh": c.get("export_kwh"),
+                  "our_in": grid_in, "our_out": grid_out}
+
+    return {"ins": ins, "outs": outs, "total": total, "gap": gap,
+            "car": has_car, "settle": settle}
+
+
+def balance_block(bal) -> str:
+    """Two proportional bars. No split between sources and sinks is implied,
+    because the data cannot support one -- six totals that balance exactly
+    leave two degrees of freedom, so any Sankey ribbon would be a convention
+    presented as a measurement."""
+    if not bal:
+        return ('<p class="muted">Not enough of this period has been measured '
+                'to draw a balance yet.</p>')
+
+    def side(items, caption):
+        segs, keys = [], []
+        for name, value, tone, detail in items:
+            pct = 100.0 * value / bal["total"]
+            tip = f"{name}: {value:.2f} kWh ({pct:.1f}%)"
+            if detail:
+                tip += f" = {detail}" if tone == "grid" else f" - {detail}"
+            inner = (f'<span>{value:.1f}</span>'
+                     if pct >= BALANCE_LABEL_PCT else "")
+            segs.append(f'<div class="seg s-{tone}" style="flex:{value:.4f}" '
+                        f'title="{escape(tip)}">{inner}</div>')
+            keys.append(f'<li><i class="k-{tone}"></i>{escape(name)} '
+                        f'<b>{value:.2f}</b> '
+                        f'<span class="pc">{pct:.0f}%</span></li>')
+        return (f'<div class="barrow"><div class="cap2">{caption}</div>'
+                f'<div class="bar">{"".join(segs)}</div>'
+                f'<ul class="keys">{"".join(keys)}</ul></div>')
+
+    if bal["car"]:
+        note = ('Grid figures are the <b>plant\'s own CT with the car folded '
+                'in</b> from the Zappi\'s meter. The charger is wired outside '
+                'that CT, so its draw is added to import and the solar it '
+                'diverted is taken back off export &mdash; which is why the '
+                'two bars balance exactly.')
+    else:
+        note = ('Grid figures are the <b>plant\'s own CT</b>. The car is wired '
+                'outside that CT and the charger did not report, so it is not '
+                'counted here.')
+
+    gap = abs(bal["gap"])
+    if gap > BALANCE_MIN_GAP:
+        note += (f' The hatched {gap:.2f} kWh &mdash; '
+                 f'{100.0 * gap / bal["total"]:.1f}% of throughput &mdash; is '
+                 f'what the two instruments disagree by. It is shown rather '
+                 f'than folded into the house figure, which is derived rather '
+                 f'than measured.')
+
+    st = bal["settle"]
+    if st and st["complete"] and isinstance(st["export_kwh"], (int, float)):
+        def drift(theirs, ours):
+            return f"{100.0 * (theirs - ours) / ours:+.0f}%" if ours else "n/a"
+        note += (f' Cross-check: Octopus\'s settlement meter read '
+                 f'{st["import_kwh"]:.2f} kWh in and {st["export_kwh"]:.2f} '
+                 f'out over the same period &mdash; '
+                 f'{drift(st["import_kwh"], st["our_in"])} and '
+                 f'{drift(st["export_kwh"], st["our_out"])} against the bars '
+                 f'above. Different instruments; the billed figures are the '
+                 f'ones in Money.')
+    elif st:
+        note += (f' Octopus\'s settlement meter has published '
+                 f'{st["pct"]:.0f}% of this period, too little to compare '
+                 f'against.')
+
+    return (side(bal["ins"], "In &mdash; where it came from")
+            + side(bal["outs"], "Out &mdash; where it went")
+            + f'<p class="muted">Both bars total {bal["total"]:.2f} kWh. '
+            + note + '</p>')
+
+
 def render_report(rep: dict) -> bytes:
     tabs = '<a href="/">Live</a> ' + " ".join(
         f'<a class="{"on" if key == rep["period"] else ""}" '
@@ -2106,9 +2273,44 @@ def render_report(rep: dict) -> bytes:
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Energy &middot; {escape(rep['label'])}</title>
 <style>
-:root {{ color-scheme: light dark; --line:#8883; --muted:#8886; }}
+:root {{ color-scheme: light dark; --line:#8883; --muted:#8886;
+  --solar:#c2870f; --grid:#2f6fb8; --batt:#d81b60; --house:#5f7480;
+  --ev:#4d9e2a; --gap:#9aa7ae; }}
+/* Dark steps are SELECTED, not an automatic flip of the light ones. The hues
+   are the same, lifted to stay inside the lightness band on a dark ground. */
+@media (prefers-color-scheme: dark) {{
+  :root {{ --solar:#e8b64c; --grid:#6aa9e8; --batt:#f2679c; --house:#93a5b0;
+    --ev:#7fc74f; --gap:#69777f; }}
+}}
 body {{ font:15px/1.5 -apple-system, system-ui, sans-serif; margin:0;
         padding:1.2rem; max-width:780px; }}
+.barrow {{ margin:0 0 1.1rem; }}
+.cap2 {{ font-size:.68rem; font-weight:700; letter-spacing:.13em;
+  text-transform:uppercase; color:var(--muted); margin-bottom:.35rem; }}
+.bar {{ display:flex; gap:2px; height:46px; }}
+.seg {{ border-radius:3px; display:flex; align-items:center;
+  justify-content:center; min-width:0; overflow:hidden; }}
+.seg:first-child {{ border-radius:5px 3px 3px 5px; }}
+.seg:last-child {{ border-radius:3px 5px 5px 3px; }}
+.seg span {{ font-size:12.5px; font-weight:700; color:#fff; padding:0 3px; }}
+.s-solar {{ background:var(--solar); }} .s-grid {{ background:var(--grid); }}
+.s-batt {{ background:var(--batt); }} .s-house {{ background:var(--house); }}
+.s-ev {{ background:var(--ev); }}
+.s-gap {{ background:repeating-linear-gradient(45deg, var(--gap) 0 3px,
+  transparent 3px 6px); border:1px solid var(--gap); }}
+.keys {{ list-style:none; display:flex; flex-wrap:wrap; gap:.15rem 1.1rem;
+  margin:.45rem 0 0; padding:0; font-size:.85rem; }}
+.keys li {{ display:flex; align-items:center; gap:.36rem;
+  color:var(--muted); }}
+.keys b {{ color:inherit; font-weight:650; }}
+.keys .pc {{ font-variant-numeric:tabular-nums; }}
+.keys i {{ width:10px; height:10px; border-radius:2.5px;
+  display:inline-block; flex:none; }}
+.k-solar {{ background:var(--solar); }} .k-grid {{ background:var(--grid); }}
+.k-batt {{ background:var(--batt); }} .k-house {{ background:var(--house); }}
+.k-ev {{ background:var(--ev); }}
+.k-gap {{ background:repeating-linear-gradient(45deg, var(--gap) 0 2px,
+  transparent 2px 4px); outline:1px solid var(--gap); outline-offset:-1px; }}
 h1 {{ font-size:1.1rem; margin:0 0 .1rem; font-weight:600; }}
 h2 {{ font-size:.78rem; text-transform:uppercase; letter-spacing:.09em;
       margin:1.6rem 0 .4rem; color:var(--muted); font-weight:600; }}
@@ -2145,6 +2347,9 @@ footer {{ margin-top:2rem; color:var(--muted); font-size:.82rem; }}
 
 <h2>Money</h2>
 {money_block(rep.get("costs") or {}, max(1, (rep["end"] - rep["start"]).days * 48 + 48))}
+
+<h2>Balance</h2>
+{balance_block(balance(rep, max(1, (rep["end"] - rep["start"]).days * 48 + 48)))}
 
 <h2>Plant</h2>
 <p class="muted">Measured by the SigenStor's own CT, over the whole period.
