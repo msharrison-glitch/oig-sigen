@@ -1124,6 +1124,45 @@ def main() -> int:
     names = re.findall(r'class="label">([^<]+)<', body)
     check("report page merges meters and plugs into one sorted run", names,
           ["Boiler", "Freezer", "Zappi feed"])
+
+    print("\n  ...and one string label means one row, not one per relay")
+    # 192.168.2.16 is a two-relay device carrying a single string label. A
+    # string names the DEVICE, a dict names each CHANNEL -- so its relays sum.
+    two = {"host": "h9", "channels": [
+        {"id": "relay:0", "kind": "switch", "watts": 120.0, "on": True},
+        {"id": "relay:1", "kind": "switch", "watts": 80.0, "on": True}]}
+    one = dashboard.shelly_rows([two], {"h9": "Kitchen"})
+    check("the two relays become a single row",
+          re.findall(r'class="cname">([^<]+)<', one), ["Kitchen"])
+    check("and their power is summed", "200 W" in one, True)
+    check("the relay ids are gone from the label", "relay:0" in one, False)
+    check("both on reads as on",
+          re.findall(r'class="cstate[^>]*>([^<]*)<', one), ["on"])
+
+    mixed_state = dashboard.shelly_rows([{"host": "h9", "channels": [
+        dict(two["channels"][0]), dict(two["channels"][1], on=False)]}],
+        {"h9": "Kitchen"})
+    check("half a circuit live is not flattened to 'on'",
+          "1 of 2 on" in mixed_state, True)
+
+    apart = dashboard.shelly_rows([two], {"h9": {"relay:0": "Kitchen left",
+                                                 "relay:1": "Kitchen right"}})
+    check("a dict label still keeps the channels apart",
+          re.findall(r'class="cname">([^<]+)<', apart),
+          ["Kitchen left", "Kitchen right"])
+
+    summed = dashboard.render_report(dict(
+        REAL, period="yesterday", label="Yesterday", kind="day",
+        start=dt.date(2026, 9, 22), end=dt.date(2026, 9, 22),
+        labels={"h9": "Kitchen"}, em={},
+        plugs={("h9", "relay:0"): 2.5, ("h9", "relay:1"): 1.25},
+        recording_since=None, daikin={"error": "none"},
+        costs=dict(REAL["costs"], import_cost=8.38, export_income=14.00,
+                   net=5.62, cheap_kwh=48.37, peak_kwh=20.85))).decode()
+    tail = summed[summed.index("<h2>Circuits"):]
+    check("the report page sums them too",
+          re.findall(r'class="label">([^<]+)<', tail), ["Kitchen"])
+    check("to the right total", "3.75 kWh" in tail, True)
     check("no chart still renders prose",
           "not enough" in dashboard.balance_block(None).lower(), True)
     check("the no-car case says why the car is missing",

@@ -956,9 +956,45 @@ def shelly_rows(shellys, labels=None) -> str:
             live.append((label_for(device, "", labels), None,
                          f'unreachable ({device["error"]})', None))
             continue
-        for channel in device["channels"]:
+
+        # A STRING label names the whole DEVICE; a DICT names each channel.
+        # That distinction is already how .shelly-labels.json reads, so a
+        # two-relay device under one string label is one thing measured twice
+        # and its channels are SUMMED into a single row. Previously they were
+        # split out as "Kitchen · relay:0" and "· relay:1", which showed the
+        # wiring rather than the circuit. Give the device a dict label if you
+        # do want the channels apart.
+        #
+        # An EXPLICIT string label is required, not merely the absence of a
+        # dict. An unlabelled multi-channel device falls back to its model or
+        # IP, and merging those would hide channels the reader has no way to
+        # name -- they keep their id suffix instead, which is also the hint
+        # that they want labelling.
+        entry = labels.get(device["host"])
+        channels = device["channels"]
+        if isinstance(entry, str) and entry and len(channels) > 1:
+            # Not `watts` -- that is the module-level formatter, and shadowing
+            # it here raised UnboundLocalError further down the function.
+            drawn = [c.get("watts") for c in channels
+                     if isinstance(c.get("watts"), (int, float))]
+            switches = [c for c in channels if c["kind"] == "switch"]
+            on = [c for c in switches if c.get("on")]
+            state = ""
+            if switches:
+                # Don't flatten a mixed device to "on": half a circuit live is
+                # not the same as all of it, and that difference is the reason
+                # to look at the row at all.
+                state = ("on" if len(on) == len(switches)
+                         else "off" if not on
+                         else f"{len(on)} of {len(switches)} on")
+            live.append((label_for(device, "", labels),
+                         sum(drawn) if drawn else None, state,
+                         channels[0]["kind"]))
+            continue
+
+        for channel in channels:
             name = label_for(device, channel["id"], labels)
-            if len(device["channels"]) > 1 and name == label_for(device, "", labels):
+            if len(channels) > 1 and name == label_for(device, "", labels):
                 name = f'{name} · {channel["id"]}'
             state = ""
             if channel["kind"] == "switch":
@@ -2286,24 +2322,35 @@ def render_report(rep: dict) -> bytes:
     # merged into one sequence for the same reason: two separately sorted runs
     # in one table reads as unsorted. Case-insensitive, with the name as the
     # tiebreak so the order is stable rather than dependent on dict insertion.
-    named = []
+    # Rows that share a display name are ONE thing measured on several
+    # channels -- a two-relay device under a single string label -- so they are
+    # summed rather than listed twice. Same rule as the live page; see
+    # shelly_rows. A dict label in .shelly-labels.json keeps them apart.
+    named = {}
+
+    def add(name, value):
+        if isinstance(value, (int, float)):
+            named[str(name)] = named.get(str(name), 0.0) + float(value)
+        else:
+            named.setdefault(str(name), value)
+
     for channel, value in (rep.get("em") or {}).items():
         name = channel
         for _host, entry in (rep["labels"] or {}).items():
             if isinstance(entry, dict) and channel in entry:
                 name = entry[channel]
-        named.append((str(name), value))
+        add(name, value)
     for (host, channel), value in (rep.get("plugs") or {}).items():
         entry = (rep["labels"] or {}).get(host)
         name = entry if isinstance(entry, str) else (
             entry.get(channel, f"{host} {channel}")
             if isinstance(entry, dict) else f"{host} {channel}")
-        named.append((str(name), value))
+        add(name, value)
 
     circuits = [f'<tr><td class="label">{escape(name)}</td>'
                 f'<td class="value">{kwh(value)} kWh</td></tr>'
-                for name, value in sorted(named, key=lambda r: (r[0].lower(),
-                                                                r[0]))]
+                for name, value in sorted(named.items(),
+                                          key=lambda r: (r[0].lower(), r[0]))]
     since = rep.get("recording_since")
     if not rep.get("plugs"):
         note = ("plug history starts when the recorder does"
