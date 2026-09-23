@@ -2365,39 +2365,89 @@ def render_report(rep: dict) -> bytes:
 <title>Energy &middot; {escape(rep['label'])}</title>
 <style>
 :root {{ color-scheme: light dark; --line:#8883; --muted:#8886;
-  {SERIES_COLOURS} --gap:#8b969d; }}
+  {SERIES_COLOURS} --gap:#8b969d;
+  /* The tooltip needs its OWN colours. This page sets no --bg or --text -- it
+     rides the browser's default light/dark body colours -- so the tip was
+     styled `background:var(--text)` against variables that do not exist here,
+     resolved to nothing, and rendered as transparent text over the heading.
+     Invisible in the HTML, obvious the moment it was hovered in a browser.
+     Inverted against the page in each mode, so it reads as an overlay. */
+  --tipbg:#1e252a; --tipfg:#f4f7f9; }}
+@media (prefers-color-scheme: dark) {{
+  :root {{ --tipbg:#e9eef1; --tipfg:#10161a; }}
+}}
 body {{ font:15px/1.5 -apple-system, system-ui, sans-serif; margin:0;
         padding:1.2rem; max-width:780px; }}
 /* The hover layer is CSS only. test_dashboard.py fails the build if a
    <script> tag ever appears on this page, and that rail is worth more than a
    tooltip library -- the page has to render over an SSH tunnel with nothing
-   installed. The tip is positioned against .barrow rather than the segment it
-   belongs to, because a 2%-wide segment near either end would push a
-   segment-anchored tooltip off the screen at phone width. tabindex makes it
-   reachable by keyboard and by tap, where :hover never fires. */
-.barrow {{ margin:0 0 1.1rem; position:relative; }}
+   installed. tabindex makes it reachable by keyboard and by tap, where :hover
+   never fires.
+
+   The tip is anchored to the SEGMENT. A first version anchored it to the row
+   instead, to dodge a narrow end segment pushing it off a phone screen, and
+   that was plainly wrong the moment it was looked at in a browser: hovering
+   the 6%-wide Solar slice at the far left put its tooltip in the middle of
+   the row, floating over Grid import, and high enough to cross the section
+   heading. It read as belonging to the wrong slice.
+
+   The overflow problem it was dodging is instead solved by clamping the two
+   ends -- first segment aligns its tip left, last aligns right -- so nothing
+   can leave the page and every tip still points at what it describes. */
+.barrow {{ margin:0 0 1.1rem; }}
 .cap2 {{ font-size:.68rem; font-weight:700; letter-spacing:.13em;
   text-transform:uppercase; color:var(--muted); margin-bottom:.35rem; }}
 .bar {{ display:flex; gap:2px; height:46px; }}
 .seg {{ border-radius:3px; display:flex; align-items:center;
-  justify-content:center; min-width:0; cursor:default; }}
+  justify-content:center; min-width:0; cursor:default; position:relative; }}
 .seg:first-child {{ border-radius:5px 3px 3px 5px; }}
 .seg:last-child {{ border-radius:3px 5px 5px 3px; }}
 .sv {{ font-size:12.5px; font-weight:700; color:#fff; padding:0 3px;
   overflow:hidden; white-space:nowrap; }}
 .seg:focus {{ outline:2px solid var(--text); outline-offset:2px; }}
-.tip {{ position:absolute; left:50%; bottom:calc(100% + 7px);
-  transform:translateX(-50%) translateY(3px); background:var(--text);
-  color:var(--bg); padding:.42rem .6rem; border-radius:7px; font-size:.78rem;
-  line-height:1.4; text-align:center; width:max-content;
-  max-width:min(17rem, 78vw); opacity:0; pointer-events:none; z-index:6;
+.tip {{ position:absolute; left:50%; bottom:calc(100% + 9px);
+  --slide:3px; transform:translateX(-50%) translateY(var(--slide));
+  background:var(--tipbg); color:var(--tipfg); padding:.42rem .6rem;
+  border-radius:7px; font-size:.78rem; line-height:1.4; text-align:center;
+  width:max-content; max-width:min(17rem, 78vw); opacity:0;
+  pointer-events:none; z-index:6;
   transition:opacity .12s ease, transform .12s ease;
   box-shadow:0 3px 10px rgba(0,0,0,.28); }}
 .tip b {{ font-weight:700; }}
 .tip i {{ font-style:normal; opacity:.72; }}
-.seg:hover .tip, .seg:focus .tip {{ opacity:1;
-  transform:translateX(-50%) translateY(0); }}
+/* The pointer, so the tip is tied to its slice by shape and not only by
+   proximity -- adjacent slices are only 2px apart. */
+.tip::after {{ content:""; position:absolute; top:100%; left:50%;
+  margin-left:-5px; border:5px solid transparent;
+  border-top-color:var(--tipbg); }}
+/* Clamp the ends so a tip can never leave the page. The arrow stays over the
+   slice even though the box no longer centres on it. */
+.seg:first-child .tip {{ left:0; transform:translateX(0)
+  translateY(var(--slide)); }}
+.seg:first-child .tip::after {{ left:16px; }}
+.seg:last-child .tip {{ left:auto; right:0; transform:translateX(0)
+  translateY(var(--slide)); }}
+.seg:last-child .tip::after {{ left:auto; right:11px; }}
+.seg:hover .tip, .seg:focus .tip {{ opacity:1; --slide:0px; }}
 @media (hover:none) {{ .tip {{ transition:none; }} }}
+/* On a phone the end-clamps are not enough: they only rescue the first and
+   last slice, and a tip centred on a NARROW MIDDLE slice still runs off the
+   screen -- at 400px the bar is ~368px and a tip up to 272px, so the 6%-wide
+   Car slice would hang off the left edge. Below 560px the tip therefore spans
+   the whole row and drops its arrow: at that size the finger is already on
+   the slice, so pointing at it adds nothing that touch has not said. .seg
+   goes static so the tip resolves against .barrow instead of the slice, and
+   the end-clamps are explicitly undone -- they are more specific than .tip
+   and would otherwise survive. */
+@media (max-width:560px) {{
+  .barrow {{ position:relative; }}
+  .seg {{ position:static; }}
+  .seg .tip, .seg:first-child .tip, .seg:last-child .tip {{
+    left:0; right:0; width:auto; max-width:none;
+    transform:translateY(var(--slide)); }}
+  .tip::after {{ display:none; }}
+  .seg:hover .tip, .seg:focus .tip {{ transform:translateY(0); }}
+}}
 .s-solar {{ background:var(--solar); }} .s-grid {{ background:var(--grid); }}
 .s-batt {{ background:var(--batt); }} .s-house {{ background:var(--house); }}
 .s-ev {{ background:var(--ev); }}
