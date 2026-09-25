@@ -1,7 +1,23 @@
 # Proposal: release when the car finishes, not when Octopus notices
 
-Status: **proposed**, not built. Written 2026-09-05 after one night's
-settlement data. Wants a second night before it goes near the plant.
+Status: **BUILT 2026-09-25**, in `reconcile.py`
+`_release_for_finished_car`, pinned by seven cases in `test_reconcile.py`.
+Written 2026-09-05 after one night's settlement data, and deliberately held
+back for a second night's confirmation — see "Before building" below.
+
+**The second observation arrived 2026-09-25 and confirmed the design.** The
+car finished partway through the 21:00–21:30 local half hour, and that half
+hour still appears in `completedDispatches` **in full, at −2 kWh**. So Octopus
+does not truncate a settlement period to the moment charging stops, and
+releasing at the boundary rather than on the spot is worth up to 30 minutes of
+4.49p charging per session.
+
+That evening also showed why the rule is still needed even though nothing was
+lost on the night: the agent released at 21:30 only because Octopus happened to
+re-plan the schedule then, which forced a fresh confirmation the finished car
+failed. Octopus re-planned four times that evening, but nothing guarantees it —
+without a re-plan the agent would have held until a withdrawal, which is the
+18-minute peak-rate gap measured below.
 
 ## The problem, measured
 

@@ -398,6 +398,21 @@ def desired_slot(slots: list[Slot], now: datetime) -> Slot | None:
     return None
 
 
+def next_half_hour(moment: datetime) -> datetime:
+    """The next settlement boundary strictly after `moment`.
+
+    Octopus bills in half-hours, so this is the unit a release has to respect.
+    A moment exactly on a boundary returns the NEXT one: 21:30:00 gives 22:00,
+    because the half hour beginning at 21:30 has not been paid for yet.
+    """
+    base = moment.replace(minute=0, second=0, microsecond=0)
+    for offset in (30, 60):
+        stamp = base + timedelta(minutes=offset)
+        if stamp > moment:
+            return stamp
+    return base + timedelta(minutes=90)
+
+
 def next_poll(now: datetime,
               minutes: tuple[int, ...] = POLL_MINUTES) -> datetime:
     """The next scheduled poll on the half-hour grid."""
@@ -590,6 +605,13 @@ class Reconciler:
         # whatever the SOC is, which is the old behaviour and safe -- it can
         # charge one extra time, not skip a slot.
         self._at_target = False
+        # When the charger last reported the car FINISHED while we were
+        # holding a dispatch. None means "not finished, as far as we know".
+        # Deliberately not persisted: a restart re-observes it within one
+        # tick, where a stale value from hours ago would release a slot that
+        # is genuinely live.
+        self._car_finished_at: datetime | None = None
+        self._finish_announced = False
 
     # -- inputs ----------------------------------------------------------
 
@@ -1058,7 +1080,10 @@ class Reconciler:
         self._awaiting_confirmation = False
         if target is not None and self.confirm_dispatch:
             key = target.start.isoformat()
-            if key not in self._confirmed:
+            if key in self._confirmed and self._release_for_finished_car(now):
+                target = None
+                reason = " (car finished)"
+            elif key not in self._confirmed:
                 drawing = (self._zappi_drawing() if self.zappi is not None
                            else self._ev_drawing(state))
                 if drawing:
@@ -1144,6 +1169,76 @@ class Reconciler:
         log.info("dispatch %s-%s completed: the car is taking charge",
                  done.local()[0].strftime("%H:%M"),
                  done.local()[1].strftime("%H:%M"))
+        return True
+
+    def _release_for_finished_car(self, now: datetime) -> bool:
+        """Should we hand back a confirmed slot because the car is done?
+
+        A confirmed slot normally stays confirmed for its duration, so that a
+        car which cycles does not make us acquire and release every few
+        minutes at 20-30 s of actuation each. That is right for a car that
+        PAUSES and wrong for one that has FINISHED: Octopus withdraws the
+        remaining dispatch eventually, but observed 2026-09-04 it took about
+        18 minutes, and every one of those minutes bills at peak.
+
+        So keep consulting the charger after confirmation, but act only on the
+        terminal state, and only at a settlement boundary.
+
+        THE BOUNDARY IS THE POINT, and it is why this waits rather than
+        releasing on the spot. Octopus bills in whole half-hours and does not
+        truncate one to the moment charging stopped -- confirmed on this
+        account 2026-09-25, when the car finished partway through 21:00-21:30
+        local and that half hour still settled in full at -2 kWh. Releasing
+        immediately would forfeit up to 30 minutes of charging already paid
+        for at 4.49p, which the proposal reckoned would cost more than it
+        saved about half the time. Releasing at the boundary captures exactly
+        what is covered and nothing that is not.
+
+        Only `finished` counts. Paused, Waiting and a bare 0 kW all mean "not
+        now" rather than "not again", and a car that resumes cancels the
+        pending release outright.
+        """
+        if self.zappi is None:
+            return False
+        try:
+            state = self.zappi.status()
+        except (ZappiError, OSError) as exc:
+            # Unknown is not finished. Failing closed here would mean the
+            # OPPOSITE of everywhere else in this file: it would hand back a
+            # slot we are entitled to, on no evidence.
+            log.warning("Zappi unreachable (%s) -- holding the slot", exc)
+            return False
+        if state is None:
+            return False
+
+        if not state.get("finished"):
+            if self._car_finished_at is not None:
+                log.info("Zappi: %s -- the car resumed, cancelling the "
+                         "pending release", state["status"])
+                self._car_finished_at = None
+                self._finish_announced = False
+            return False
+
+        if self._car_finished_at is None:
+            self._car_finished_at = now
+            self._finish_announced = False
+            log.info("Zappi: %s, %.2f kW -- the car has finished; releasing "
+                     "at %s local, the end of this half hour",
+                     state["status"], state["power_kw"] or 0.0,
+                     next_half_hour(now).astimezone(LOCAL_TZ).strftime("%H:%M"))
+
+        due = next_half_hour(self._car_finished_at) - timedelta(
+            seconds=RELEASE_LEAD)
+        if now < due:
+            return False
+        # Said once, not on every tick for the rest of the slot -- this keeps
+        # returning True until the slot ends or the car resumes.
+        if not self._finish_announced:
+            self._finish_announced = True
+            log.info("car finished at %s local and this half hour is now paid "
+                     "for -- standing down rather than importing at peak",
+                     self._car_finished_at.astimezone(LOCAL_TZ)
+                     .strftime("%H:%M"))
         return True
 
     def _zappi_drawing(self) -> bool:

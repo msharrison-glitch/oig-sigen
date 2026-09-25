@@ -67,6 +67,13 @@ CHARGE_STATUS = {1: "Paused", 2: "Waiting", 3: "Charging",
 # Statuses that mean the car is taking energy. Boosting is here because that
 # is what an Octopus-driven charge looks like.
 DRAWING_STATUSES = (3, 4)
+
+# The TERMINAL status: the car has taken all it wants. Distinct from 1 Paused
+# and 2 Waiting, which both mean "not now" rather than "not again" -- a paused
+# car may resume within the same dispatch, a complete one will not. Exposed as
+# its own flag because reconcile.py releases on it, and a release keyed off a
+# string comparison at the call site is one typo away from never firing.
+FINISHED_STATUS = 5
 ZAPPI_MODE = {1: "Fast", 2: "Eco", 3: "Eco+", 4: "Stopped"}
 PLUG_STATUS = {
     "A": "EV disconnected",
@@ -153,6 +160,7 @@ class ZappiClient:
         return {
             "serial": z.get("sno"),
             "charging": z.get("sta") in DRAWING_STATUSES,
+            "finished": z.get("sta") == FINISHED_STATUS,
             "status": CHARGE_STATUS.get(z.get("sta"), f"? ({z.get('sta')})"),
             "mode": ZAPPI_MODE.get(z.get("zmo"), f"? ({z.get('zmo')})"),
             "plug": PLUG_STATUS.get(z.get("pst"), z.get("pst")),

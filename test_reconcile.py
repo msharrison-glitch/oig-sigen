@@ -259,12 +259,15 @@ def main() -> int:
     print("\nA planned dispatch is a forecast; the car drawing is proof")
 
     class FakeZappi:
-        def __init__(self, charging, power=7.0):
+        def __init__(self, charging, power=7.0, finished=False):
             self.charging, self.power, self.calls = charging, power, 0
+            self.finished = finished
         def status(self):
             self.calls += 1
             return {"charging": self.charging, "power_kw": self.power,
-                    "status": "Charging" if self.charging else "Paused",
+                    "finished": self.finished,
+                    "status": ("Charging" if self.charging
+                               else "Complete" if self.finished else "Paused"),
                     "plug": "x"}
 
     class DeadZappi:
@@ -297,7 +300,82 @@ def main() -> int:
     zap.charging = False
     check("a mid-slot pause does not drop the lease",
           rec_y.tick(now), "holding")
-    check("and the Zappi is not re-queried once confirmed", zap.calls, 1)
+    # The charger IS consulted again after confirmation -- that is how a
+    # FINISHED car is noticed. What stays sticky is the confirmation itself:
+    # a pause is "not now", not "not again", so the lease survives it.
+    check("but the charger is still consulted, to catch a finished car",
+          zap.calls, 2)
+
+    # ------------------------------------------- the car finishes mid-slot
+    # Octopus withdraws the rest of a dispatch once the car is done, but it
+    # took ~18 minutes to do so on 2026-09-04, and every one of those minutes
+    # bills at PEAK. So release ourselves -- at the settlement boundary, not
+    # on the spot, because Octopus pays for the whole half hour containing
+    # the car's last charging (confirmed 2026-09-25: the car stopped partway
+    # through 21:00-21:30 local and that half hour still settled in full).
+    print("\nA finished car hands the slot back, at the half-hour boundary")
+
+    # 22:05, so the boundary is 22:30 and the arithmetic is readable.
+    t05 = now.replace(minute=5, second=0, microsecond=0)
+    span = slot_at(t05, -5, 115, "dispatch")     # 22:00 -> 00:00, well past it
+
+    def finishing_rec():
+        plant = make_plant(soc_pct=40.0)
+        z = FakeZappi(charging=True)
+        r = reconcile.Reconciler(client_for(plant), FakeOctopus([span]),
+                                 5.0, 95.0, bonus_only=True, zappi=z)
+        r.confirm_dispatch = True
+        r.tick(t05)                              # confirm it while drawing
+        return r, z
+
+    rec_f, zap_f = finishing_rec()
+    zap_f.charging, zap_f.finished = False, True
+    check("the car finishes -> keep charging to the boundary",
+          rec_f.tick(t05 + timedelta(minutes=10)), "holding")
+    check("still holding one second before the release point",
+          rec_f.tick(t05.replace(minute=30) - timedelta(seconds=31)),
+          "holding")
+    check("and hands back at the boundary, less RELEASE_LEAD",
+          rec_f.tick(t05.replace(minute=30) - timedelta(seconds=30)),
+          "RELEASED")
+
+    # A PAUSED car is "not now", not "not again" -- it must not trigger this.
+    rec_p, zap_p = finishing_rec()
+    zap_p.charging, zap_p.power = False, 0.0     # paused, never finished
+    check("a paused car never triggers the release",
+          rec_p.tick(t05.replace(minute=59)), "holding")
+
+    # Finished, then resumed: the pending release is cancelled outright.
+    rec_r, zap_r = finishing_rec()
+    zap_r.charging, zap_r.finished = False, True
+    rec_r.tick(t05 + timedelta(minutes=5))       # arms the release
+    zap_r.charging, zap_r.finished = True, False
+    check("a car that resumes cancels the pending release",
+          rec_r.tick(t05.replace(minute=30) + timedelta(minutes=1)),
+          "holding")
+    check("and the armed time is cleared", rec_r._car_finished_at, None)
+
+    # Finishing at 22:29 must release at 22:30, not wait for 23:00.
+    rec_e, zap_e = finishing_rec()
+    zap_e.charging, zap_e.finished = False, True
+    rec_e.tick(t05.replace(minute=29))
+    check("finishing at :29 releases at :30, not an hour later",
+          rec_e.tick(t05.replace(minute=30) - timedelta(seconds=30)),
+          "RELEASED")
+
+    check("boundary maths: 22:29 -> 22:30",
+          reconcile.next_half_hour(t05.replace(minute=29)).minute, 30)
+    check("22:30 is not its own boundary -- that half hour is unpaid",
+          reconcile.next_half_hour(t05.replace(minute=30)).hour,
+          (t05.hour + 1) % 24)
+
+    # An unreachable charger must NOT release. Everywhere else in the agent
+    # "unknown" fails closed; here that would mean giving back a slot we are
+    # entitled to, on no evidence at all.
+    rec_u, _ = finishing_rec()
+    rec_u.zappi = DeadZappi()
+    check("an unreachable charger holds the slot, it does not hand it back",
+          rec_u.tick(t05 + timedelta(minutes=10)), "holding")
 
     # A car that starts mid-slot must still be caught: check again soon
     # rather than waiting for the next :25/:55 poll.
