@@ -93,6 +93,7 @@ SLEEP_CHUNK = 5.0
 # within SLEEP_CHUNK, then deletes it. Beside the other state files, so
 # IOG_STATE_DIR moves it with them.
 REPOLL_FILE = state_path(".repoll")
+AGENT_LOCK_FILE = state_path(".agent.pid")
 
 # Set when the trigger file cannot be deleted. Without this the loop would
 # see it again on every chunk and re-poll forever, hammering Octopus.
@@ -1567,6 +1568,99 @@ def another_controller_running() -> int | None:
     return pid if pid_alive(pid) else None
 
 
+def _read_lock_pid() -> int | None:
+    """Whatever pid the lock file names, ours included. None if unreadable."""
+    try:
+        text = AGENT_LOCK_FILE.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None          # absent, or unreadable: both read as no lock
+    try:
+        return int(text)
+    except ValueError:
+        return None          # garbage, so stale
+
+
+def _lock_holder() -> int | None:
+    """A LIVE pid in the lock file that is not us."""
+    pid = _read_lock_pid()
+    if pid is None or pid == os.getpid():
+        return None
+    # "Cannot tell" reads as "not running", exactly as another_controller_
+    # running() treats it, and for the same reason: a lock file we cannot
+    # interpret must not lock the agent out permanently.
+    return pid if pid_alive(pid) else None
+
+
+def acquire_agent_lock() -> int | None:
+    """Claim sole control of this plant. Returns the other pid if refused.
+
+    The lease file cannot do this job, and that gap ran unnoticed for weeks.
+    `.lease.json` exists only on the MODBUS path, so another_controller_
+    running() guards nothing at all under --via-cloud -- the path that
+    actually runs every night. On 2026-09-30 two agents had been running for
+    five days: a transient DNS failure made one release and restore the
+    owner's mode, and the other read its sibling's restore through all three
+    _lost_the_plant gates -- 30003 AND the cloud, both telling the truth --
+    as the owner taking the plant back, and stood down for the rest of a
+    confirmed bonus slot. The gates cannot tell an owner from a sibling.
+
+    _cloud_stop already said so in a comment: "one agent per plant is what
+    actually prevents that failure". It was diagnosed and never enforced.
+    This enforces it for BOTH actuators, because the next gap would
+    otherwise be whichever one the guard was not written against.
+    """
+    for _ in range(3):
+        try:
+            fd = os.open(AGENT_LOCK_FILE,
+                         os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            other = _lock_holder()
+            if other is not None:
+                return other
+            try:
+                AGENT_LOCK_FILE.unlink()   # stale: the pid in it is gone
+            except OSError:
+                pass                       # someone else cleared it first
+            continue
+        except OSError as exc:
+            # A lock we cannot create must not stop the agent charging. The
+            # duplicate is a costly bug; refusing to run at all is worse.
+            log.warning("could not create %s (%s) -- starting UNGUARDED",
+                        AGENT_LOCK_FILE, exc)
+            return None
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(f"{os.getpid()}\n")
+        except OSError as exc:
+            log.warning("could not write %s (%s) -- starting UNGUARDED",
+                        AGENT_LOCK_FILE, exc)
+            return None
+        # Creating it is not the same as winning it. Two agents that both
+        # find the SAME stale file can each unlink it and each create their
+        # own, so the file is re-read: whoever it names is the holder.
+        # This narrows the race to the gap between write and re-read rather
+        # than closing it -- flock would close it, and is not on Windows,
+        # which this agent supports. The race observed in the wild was 26
+        # SECONDS wide, so the check is comfortably sized for it.
+        holder = _read_lock_pid()
+        return None if holder == os.getpid() else holder
+    return _lock_holder()
+
+
+def release_agent_lock() -> None:
+    """Drop the lock, but only when it is still ours.
+
+    A --dry-run run never took it, and an agent that lost the race above
+    must not delete the winner's lock on its way out.
+    """
+    if _read_lock_pid() != os.getpid():
+        return
+    try:
+        AGENT_LOCK_FILE.unlink()
+    except OSError:
+        pass
+
+
 def setup_logging(path: str | None, verbose: bool) -> None:
     handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout)]
     if path:
@@ -1662,6 +1756,20 @@ def main() -> int:
         log.error("pid %d already holds %s -- refusing to start a second "
                   "controller", other, control.STATE_FILE.name)
         return 2
+
+    if not args.dry_run:
+        # --dry-run is exempt deliberately: it commands nothing, so two of
+        # them cannot fight over the plant, and `--dry-run --once` is the
+        # documented way to ask a running agent what it would do.
+        other = acquire_agent_lock()
+        if other is not None:
+            log.error(
+                "pid %d already holds %s -- refusing to start a second "
+                "agent. One agent per plant: two of them take turns "
+                "restoring the owner's mode, and read each other's restores "
+                "as the owner taking the plant back. If that pid is not an "
+                "agent, delete the file.", other, AGENT_LOCK_FILE)
+            return 2
 
     try:
         host = resolve_host(args.host)
@@ -1769,6 +1877,11 @@ def main() -> int:
     except (ModbusError, OSError) as exc:
         log.error("%s", exc)
         return 1
+    finally:
+        # Outside the SigenClient block on purpose: resolve_host or the
+        # cloud login can fail before it is ever entered, and a leaked lock
+        # would then refuse every later start.
+        release_agent_lock()
 
 
 if __name__ == "__main__":

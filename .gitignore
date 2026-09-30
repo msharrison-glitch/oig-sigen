@@ -3,6 +3,7 @@
 .octopus-token.json
 .cloud-mode.json
 .repoll
+.agent.pid
 __pycache__/
 .DS_Store
 
@@ -42,5 +43,6 @@ service-status.txt
 .daikin-snapshot.log
 daikin-snapshot.log
 .shelly-labels.json
+.shelly-history.jsonl
 .agent-state.json
 .agent-state.json.tmp

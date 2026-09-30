@@ -999,6 +999,58 @@ def main() -> int:
         reconcile.pid_alive = saved_alive
         control.clear_state()
 
+    print("\nOne agent per plant, whichever actuator it uses")
+    # The regression this pins: another_controller_running() reads
+    # .lease.json, which --via-cloud NEVER writes, so the cloud path had no
+    # two-controller guard at all. Every check below runs with NO lease
+    # state present, which is exactly the situation that was unguarded.
+    control.clear_state()
+    reconcile.AGENT_LOCK_FILE = _TMP / ".agent-reconcile-test.pid"
+    lock = reconcile.AGENT_LOCK_FILE
+    lock.unlink(missing_ok=True)
+
+    check("no lease state, so the OLD guard sees nothing",
+          reconcile.another_controller_running(), None)
+    check("a free lock is taken", reconcile.acquire_agent_lock(), None)
+    check("and it names us", lock.read_text().strip(), str(os.getpid()))
+    check("our own lock is not a conflict",
+          reconcile.acquire_agent_lock(), None)
+
+    # pid 1 (init) / pid 4 (System) are alive and refuse an ordinary user:
+    # EPERM must read as alive, or the guard lets a second agent through.
+    lock.write_text(f"{foreign}\n")
+    check("a live foreign pid refuses the start",
+          reconcile.acquire_agent_lock(), foreign)
+    check("and the refusal leaves their lock alone",
+          lock.read_text().strip(), str(foreign))
+    reconcile.release_agent_lock()
+    check("release must NOT remove a lock that is not ours", lock.exists(), True)
+
+    lock.write_text("999999999\n")
+    check("a dead pid is stale, so we take it over",
+          reconcile.acquire_agent_lock(), None)
+    check("and the lock now names us", lock.read_text().strip(), str(os.getpid()))
+
+    lock.write_text("not a pid\n")
+    check("garbage is stale too", reconcile.acquire_agent_lock(), None)
+
+    reconcile.release_agent_lock()
+    check("release drops our own lock", lock.exists(), False)
+    reconcile.release_agent_lock()
+    check("and is idempotent", lock.exists(), False)
+
+    # Same direction as another_controller_running(): a pid we cannot ask
+    # about must not lock the agent out for ever.
+    lock.write_text("424242\n")
+    saved_alive = reconcile.pid_alive
+    try:
+        reconcile.pid_alive = lambda _pid: None
+        check("a pid we cannot ask about does not block the lock",
+              reconcile.acquire_agent_lock(), None)
+    finally:
+        reconcile.pid_alive = saved_alive
+    lock.unlink(missing_ok=True)
+
     print("\nThe schedule churns overnight, so poll and notice")
     plant_c = make_plant(soc_pct=50.0)
     oct_c = FakeOctopus([])
