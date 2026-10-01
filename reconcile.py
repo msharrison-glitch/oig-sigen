@@ -1580,15 +1580,43 @@ def _read_lock_pid() -> int | None:
         return None          # garbage, so stale
 
 
+def _looks_like_an_agent(pid: int) -> bool | None:
+    """Does that pid's command line name this agent? None if we cannot see.
+
+    The lock is held for the WHOLE time the agent runs, where `.lease.json`
+    existed only during a hold -- so after a power cut it always names a pid
+    from the previous boot. If the kernel has since recycled that number to
+    something unrelated and alive, every launcher would refuse for ever, and
+    the plant would simply never charge again. This separates "our agent is
+    already running" from "that number belongs to something else now".
+
+    Linux only, which is where the agent is deployed and where a reboot
+    therefore matters. Elsewhere there is no /proc, the answer is None, and
+    the caller falls back to treating a live pid as a conflict -- the
+    behaviour before this check existed.
+    """
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as handle:
+            cmdline = handle.read()
+    except OSError:
+        return None          # no /proc, or not ours to read: cannot tell
+    return b"reconcile" in cmdline
+
+
 def _lock_holder() -> int | None:
-    """A LIVE pid in the lock file that is not us."""
+    """A LIVE pid in the lock file, that is not us, that IS an agent."""
     pid = _read_lock_pid()
     if pid is None or pid == os.getpid():
         return None
     # "Cannot tell" reads as "not running", exactly as another_controller_
     # running() treats it, and for the same reason: a lock file we cannot
     # interpret must not lock the agent out permanently.
-    return pid if pid_alive(pid) else None
+    if not pid_alive(pid):
+        return None
+    # Alive is not enough. Only a command line that positively does NOT name
+    # the agent clears the lock -- "cannot tell" keeps it, so this can free a
+    # recycled pid without ever freeing a real one.
+    return None if _looks_like_an_agent(pid) is False else pid
 
 
 def acquire_agent_lock() -> int | None:

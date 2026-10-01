@@ -1018,13 +1018,48 @@ def main() -> int:
 
     # pid 1 (init) / pid 4 (System) are alive and refuse an ordinary user:
     # EPERM must read as alive, or the guard lets a second agent through.
+    # _looks_like_an_agent is pinned here because the real init is NOT an
+    # agent, so on Linux the recycled-pid check would rightly free it.
+    saved_looks = reconcile._looks_like_an_agent
     lock.write_text(f"{foreign}\n")
-    check("a live foreign pid refuses the start",
-          reconcile.acquire_agent_lock(), foreign)
-    check("and the refusal leaves their lock alone",
-          lock.read_text().strip(), str(foreign))
+    try:
+        reconcile._looks_like_an_agent = lambda _pid: True
+        check("a live foreign pid refuses the start",
+              reconcile.acquire_agent_lock(), foreign)
+        check("and the refusal leaves their lock alone",
+              lock.read_text().strip(), str(foreign))
+        reconcile.release_agent_lock()
+        check("release must NOT remove a lock that is not ours",
+              lock.exists(), True)
+
+        # Only a positive "that is not an agent" frees a live pid, so the
+        # check can never free a real agent, only a recycled number.
+        reconcile._looks_like_an_agent = lambda _pid: None
+        check("a live pid we cannot identify still refuses",
+              reconcile.acquire_agent_lock(), foreign)
+
+        # The reboot case. The lock is held for the whole run, not just
+        # during a hold, so after a power cut it always names a pid from the
+        # previous boot. If the kernel recycled that number to something
+        # alive and unrelated, refusing for ever would mean the plant never
+        # charges again -- the agent must take it over.
+        reconcile._looks_like_an_agent = lambda _pid: False
+        check("a recycled pid is not an agent, so it is taken over",
+              reconcile.acquire_agent_lock(), None)
+        check("and the lock then names us",
+              lock.read_text().strip(), str(os.getpid()))
+    finally:
+        reconcile._looks_like_an_agent = saved_looks
     reconcile.release_agent_lock()
-    check("release must NOT remove a lock that is not ours", lock.exists(), True)
+
+    check("a pid with no /proc entry cannot be identified",
+          reconcile._looks_like_an_agent(999_999_999), None)
+    if Path("/proc/self/cmdline").exists():
+        # Only meaningful where /proc exists. It passes because this file is
+        # itself named test_reconcile.py, which is the coupling to know about
+        # if the suite is ever renamed.
+        check("on Linux our own command line identifies us",
+              reconcile._looks_like_an_agent(os.getpid()), True)
 
     lock.write_text("999999999\n")
     check("a dead pid is stale, so we take it over",

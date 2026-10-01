@@ -20,6 +20,26 @@ cd "$(dirname "$0")" || exit 1
 PY=/usr/local/bin/python3.9
 PATTERN='reconcile\.py'
 
+# REFUSES ON A SYSTEMD HOST, because there it cannot work. The kill below
+# matches systemd's own copy of the agent, and Restart=always brings that back
+# RestartSec later -- alongside the one started at the bottom of this script.
+# Two agents, every single run. That is exactly how this NAS came to run two
+# from 2026-09-25 to 10-01, the first of them started by this script on the day
+# it was written, and the pair then took turns restoring the owner's mode and
+# reading each other's restores as the owner taking the plant back.
+#
+# On such a host the restart is simply `kill <pid>`: systemd returns the agent
+# by itself. The rest of this script remains right for a host where nothing
+# supervises the agent, which is what it was written for.
+if command -v systemctl >/dev/null 2>&1 \
+   && systemctl is-enabled oig-sigen >/dev/null 2>&1; then
+    echo "REFUSING: systemd owns this agent (oig-sigen.service, Restart=always)." >&2
+    echo "This script would leave TWO running. Restart it with either:" >&2
+    echo "    sudo systemctl restart oig-sigen" >&2
+    echo "    kill \$(cat .agent.pid)   # systemd returns it within RestartSec" >&2
+    exit 1
+fi
+
 for f in .lease.json .cloud-mode.json; do
     if [ -f "$f" ]; then
         echo "REFUSING: $f exists, so something is held. Release it first." >&2
