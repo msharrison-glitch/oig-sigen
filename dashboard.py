@@ -588,12 +588,33 @@ def schedule_row(confirmed, covered, now=None) -> str:
                 out.append((a, b))
         return out
 
-    conf = clip(confirmed)
+    cov = clip(covered)
+
+    # confirmed_bonus_windows trims a live span at the moment it is COMPUTED,
+    # and read_agent caches its result -- so by the time the page renders, the
+    # trim can be minutes stale. Left alone, the row reads "pending" while the
+    # car is drawing and the agent is holding: wrong in the one half hour this
+    # exists for, and invisible to a test that builds its own fixture.
+    #
+    # A confirmation stands for as long as its dispatch does, so carry it
+    # forward to now -- and never past it, because Octopus can still withdraw
+    # the remainder and nothing ahead of the clock is ours to claim.
+    def carry_forward(spans):
+        out = []
+        for a, b in spans:
+            for cov_a, cov_b in cov:
+                if cov_a <= a and b <= cov_b:
+                    b = max(b, min(now, cov_b))
+                    break
+            out.append((a, b))
+        return out
+
+    conf = carry_forward(clip(confirmed))
     guar_all = clip(guaranteed_spans(day))
     guar = subtract_spans(guar_all, conf)
     # Hatched is what the schedule covers that is neither confirmed nor
     # already guaranteed cheap -- so nothing is drawn twice.
-    plan = subtract_spans(clip(covered), conf + guar_all)
+    plan = subtract_spans(cov, conf + guar_all)
 
     def seg(a, b, cls, what):
         left = (a - midnight).total_seconds() / 864.0
@@ -609,9 +630,15 @@ def schedule_row(confirmed, covered, now=None) -> str:
     parts.append('<i class="nowline" style="left:'
                  f'{(now - midnight).total_seconds() / 864.0:.3f}%"></i>')
 
-    def inside(spans):
-        return any(a <= now < b for a, b in spans)
-    if inside(guar_all) or inside(conf):
+    def inside(spans, closed=False):
+        return any(a <= now <= b if closed else a <= now < b
+                   for a, b in spans)
+    # A confirmed span is TRIMMED AT NOW by confirmed_bonus_windows -- the
+    # live one always ends exactly here, because nothing ahead of the clock
+    # is claimed. A half-open test therefore never finds now inside it, and
+    # the row read "pending" while the agent was holding and the car drawing:
+    # backwards, and wrong in precisely the half hour the row exists for.
+    if inside(guar_all) or inside(conf, closed=True):
         state, tone = "cheap", "cheap"
     elif inside(plan):
         state, tone = "pending", "muted"       # planned, car not yet drawing

@@ -846,9 +846,41 @@ def main() -> int:
                 return word
         return None
     check("inside the guaranteed window it reads cheap", state_at(3), "cheap")
+    # 07:00 sits in the morning dispatch, which no DISPATCH ACTIVE ever
+    # confirmed -- the honest "nobody knows the price of this half hour yet".
+    # NOT 22:00: that is inside the evening dispatch the car DID confirm and
+    # which is still running, so it is cheap, and an earlier version of this
+    # check asserted "pending" there only because its fixture froze the trim
+    # at 19:57 in a way the real function never would.
     check("in a planned-but-unconfirmed slot it reads pending",
-          state_at(22), "pending")
+          state_at(7), "pending")
+    check("but a confirmed dispatch stays cheap while it runs",
+          state_at(22), "cheap")
     check("outside everything it reads peak", state_at(12), "peak")
+
+    # The case the first cut got wrong, and the browser caught: a LIVE
+    # confirmed slot is trimmed at now by confirmed_bonus_windows, so its end
+    # IS now. Tested half-open, the moment the agent is actually charging
+    # reads "pending" -- backwards, in the one half hour this row exists for.
+    # ...and the same thing one step further out: read_agent CACHES the
+    # trimmed windows, so the span the row is handed can be minutes behind
+    # the clock. The confirmation still stands while its dispatch runs, so it
+    # is carried forward to now. Found on the live page, not in a fixture.
+    stale_end = dt.datetime(2026, 10, 11, 19, 57)      # cached a while ago
+    rendered_at = dt.datetime(2026, 10, 11, 20, 3)
+    stale = dashboard.schedule_row(
+        [(dt.datetime(2026, 10, 11, 19, 30), stale_end)],
+        [(dt.datetime(2026, 10, 11, 19, 30), dt.datetime(2026, 10, 11, 23, 30))],
+        now=rendered_at)
+    check("a cached trim does not make a live slot read pending",
+          ">cheap<" in stale, True)
+
+    live_now = dt.datetime(2026, 10, 11, 20, 2)
+    check("a confirmed slot ending exactly at now still reads cheap",
+          ">cheap<" in dashboard.schedule_row(
+              [(dt.datetime(2026, 10, 11, 19, 30), live_now)],
+              [(dt.datetime(2026, 10, 11, 19, 30),
+                dt.datetime(2026, 10, 11, 23, 30))], now=live_now), True)
 
     # Nothing may be drawn twice: a segment painted over another would read
     # as a different, darker state and mean nothing.
