@@ -817,6 +817,75 @@ def main() -> int:
     check("today's and tomorrow's 09:30 slot do not merge into one",
           days, [dt.date(2026, 10, 11), dt.date(2026, 10, 12)])
 
+    print("\nThe schedule strip never draws a planned slot as a cheap one")
+    # The whole point of the row. IOG bills off-peak only for dispatches that
+    # RAN, so a slot the car has not confirmed is an option on being cheap,
+    # not a price. Drawing it solid would assert 4.49p where the bill may say
+    # 29.757p -- the same trap as charging on plannedDispatches alone.
+    conf = [(dt.datetime(2026, 10, 11, 19, 30), dt.datetime(2026, 10, 11, 19, 57))]
+    covered = [(dt.datetime(2026, 10, 11, 6, 0), dt.datetime(2026, 10, 11, 9, 0)),
+               (dt.datetime(2026, 10, 11, 19, 30), dt.datetime(2026, 10, 11, 23, 30))]
+    # NOT `html` -- these checks live in the same function as the whole-page
+    # render, and shadowing that name silently emptied the palette assertions
+    # six hundred lines further down.
+    strip = dashboard.schedule_row(conf, covered,
+                                   now=dt.datetime(2026, 10, 11, 19, 50))
+    check("the confirmed stretch is drawn solid", "s-conf" in strip, True)
+    check("the unconfirmed one is drawn hatched", "s-plan" in strip, True)
+    check("the guaranteed window is drawn too", "s-guar" in strip, True)
+    check("inside a confirmed slot it reads cheap", ">cheap<" in strip, True)
+
+    # Every state must be reachable, and "pending" is the honest one: Octopus
+    # has planned this half hour, the car is not drawing, nobody knows the
+    # price yet.
+    def state_at(h, m=0):
+        out = dashboard.schedule_row(conf, covered,
+                                     now=dt.datetime(2026, 10, 11, h, m))
+        for word in ("cheap", "pending", "peak"):
+            if ">" + word + "<" in out:
+                return word
+        return None
+    check("inside the guaranteed window it reads cheap", state_at(3), "cheap")
+    check("in a planned-but-unconfirmed slot it reads pending",
+          state_at(22), "pending")
+    check("outside everything it reads peak", state_at(12), "peak")
+
+    # Nothing may be drawn twice: a segment painted over another would read
+    # as a different, darker state and mean nothing.
+    import re as _re
+    def spans_of(html, cls):
+        return _re.findall(r'class="seg ' + cls +
+                           r'" style="left:([\d.]+)%;width:([\d.]+)%', html)
+    overlapping = dashboard.schedule_row(
+        [(dt.datetime(2026, 10, 11, 2, 0), dt.datetime(2026, 10, 11, 3, 0))],
+        [(dt.datetime(2026, 10, 11, 1, 0), dt.datetime(2026, 10, 11, 4, 0))],
+        now=dt.datetime(2026, 10, 11, 12, 0))
+    edges = []
+    for cls in ("s-guar", "s-conf", "s-plan"):
+        for left, width in spans_of(overlapping, cls):
+            edges.append((float(left), float(left) + float(width)))
+    edges.sort()
+    check("a confirmed slot inside the guaranteed window splits it, not stacks",
+          all(edges[i][1] <= edges[i + 1][0] + 1e-9
+              for i in range(len(edges) - 1)), True)
+
+    # A span running past midnight must not spill off the end of the day.
+    clipped = dashboard.schedule_row(
+        (), [(dt.datetime(2026, 10, 11, 22, 0), dt.datetime(2026, 10, 12, 4, 0))],
+        now=dt.datetime(2026, 10, 11, 12, 0))
+    widest = max(float(l) + float(w)
+                 for cls in ("s-guar", "s-plan", "s-conf")
+                 for l, w in spans_of(clipped, cls))
+    check("nothing is drawn past the right-hand edge of the day",
+          widest <= 100.0001, True)
+
+    check("subtract_spans removes the covered part",
+          dashboard.subtract_spans(
+              [(dt.datetime(2026, 10, 11, 1, 0), dt.datetime(2026, 10, 11, 5, 0))],
+              [(dt.datetime(2026, 10, 11, 2, 0), dt.datetime(2026, 10, 11, 3, 0))]),
+          [(dt.datetime(2026, 10, 11, 1, 0), dt.datetime(2026, 10, 11, 2, 0)),
+           (dt.datetime(2026, 10, 11, 3, 0), dt.datetime(2026, 10, 11, 5, 0))])
+
     print("\nbonus_status reads the agent's verdict, and distrusts stale ones")
     at = dt.datetime(2026, 9, 15, 21, 0, 0)
 

@@ -520,6 +520,113 @@ def confirmed_bonus_windows(lines, now=None) -> list:
     return [(a, b) for a, b in spans if b > a]
 
 
+# The guaranteed IOG off-peak window, local time. octopus.OFF_PEAK_START and
+# OFF_PEAK_END are the source of truth; repeated rather than imported because
+# this page deliberately imports nothing that holds a credential or can
+# command the plant, and two fixed tariff times will not drift.
+GUARANTEED_START = (23, 30)
+GUARANTEED_END = (5, 30)
+
+
+def guaranteed_spans(day) -> list:
+    """The 23:30-05:30 window as it falls inside one local day.
+
+    Two pieces on any ordinary day: the tail of last night up to 05:30, and
+    tonight's from 23:30 to midnight.
+    """
+    midnight = datetime.combine(day, datetime.min.time())
+    return [(midnight,
+             midnight + timedelta(hours=GUARANTEED_END[0],
+                                  minutes=GUARANTEED_END[1])),
+            (midnight + timedelta(hours=GUARANTEED_START[0],
+                                  minutes=GUARANTEED_START[1]),
+             midnight + timedelta(days=1))]
+
+
+def subtract_spans(spans, cuts) -> list:
+    """Everything in spans that no cut covers. Both are (start, end) lists."""
+    out = []
+    for start, end in spans:
+        pieces = [(start, end)]
+        for cut_a, cut_b in cuts:
+            keep = []
+            for a, b in pieces:
+                if cut_b <= a or cut_a >= b:      # no overlap
+                    keep.append((a, b))
+                    continue
+                if cut_a > a:
+                    keep.append((a, cut_a))
+                if cut_b < b:
+                    keep.append((cut_b, b))
+            pieces = keep
+        out.extend(pieces)
+    return [(a, b) for a, b in out if b > a]
+
+
+def schedule_row(confirmed, covered, now=None) -> str:
+    """The IOG schedule as one strip across today, 00:00 to 24:00.
+
+    THREE states, and the distinction is the whole point. A planned dispatch
+    is a forecast about the CAR, not a price guarantee -- IOG bills off-peak
+    only for dispatches that actually ran -- so a slot the car has not
+    confirmed is drawn hatched, not solid. Drawing the two the same way
+    asserts a price this page does not know, and the bill may say 29.757p.
+
+    Solid comes from confirmed_bonus_windows, which is also what re-prices
+    the import line below it, so the strip and that line cannot disagree.
+    """
+    now = now or datetime.now()
+    day = now.date()
+    midnight = datetime.combine(day, datetime.min.time())
+    tomorrow = midnight + timedelta(days=1)
+
+    def clip(spans):
+        out = []
+        for a, b in spans:
+            a, b = max(a, midnight), min(b, tomorrow)
+            if b > a:
+                out.append((a, b))
+        return out
+
+    conf = clip(confirmed)
+    guar_all = clip(guaranteed_spans(day))
+    guar = subtract_spans(guar_all, conf)
+    # Hatched is what the schedule covers that is neither confirmed nor
+    # already guaranteed cheap -- so nothing is drawn twice.
+    plan = subtract_spans(clip(covered), conf + guar_all)
+
+    def seg(a, b, cls, what):
+        left = (a - midnight).total_seconds() / 864.0
+        width = (b - a).total_seconds() / 864.0
+        return (f'<i class="seg {cls}" style="left:{left:.3f}%;'
+                f'width:{width:.3f}%"><b>{a:%H:%M}&ndash;{b:%H:%M} '
+                f'&middot; {escape(what)}</b></i>')
+
+    parts = [seg(a, b, "s-guar", "guaranteed window") for a, b in guar]
+    parts += [seg(a, b, "s-plan", "bonus planned -- cheap only if the car draws")
+              for a, b in plan]
+    parts += [seg(a, b, "s-conf", "bonus confirmed -- car drew") for a, b in conf]
+    parts.append('<i class="nowline" style="left:'
+                 f'{(now - midnight).total_seconds() / 864.0:.3f}%"></i>')
+
+    def inside(spans):
+        return any(a <= now < b for a, b in spans)
+    if inside(guar_all) or inside(conf):
+        state, tone = "cheap", "cheap"
+    elif inside(plan):
+        state, tone = "pending", "muted"       # planned, car not yet drawing
+    else:
+        state, tone = "peak", "peak"
+
+    return (
+        '<div class="sparkrow">'
+        '<div class="sname">IOG schedule'
+        '<span class="srange">guaranteed &middot; bonus</span></div>'
+        f'<div class="sline schedline">{"".join(parts)}</div>'
+        f'<div class="snow g-{tone}">{state}</div>'
+        '</div>')
+
+
 def correct_buy_tariff(points, windows, off_peak_p):
     """Re-price the bonus slots Sigen's series shows at peak.
 
@@ -637,9 +744,11 @@ def read_agent(log_path: str, state_file=None) -> dict:
     try:
         out["bonus"] = bonus_status(lines, published)
         out["bonus_windows"] = confirmed_bonus_windows(lines)
+        out["covered_windows"] = dispatch_coverage(lines)
     except Exception:                             # noqa: BLE001
         out["bonus"] = None           # unknown: the card falls back to Sigen
         out["bonus_windows"] = []
+        out["covered_windows"] = []
     with _agent_lock:
         _agent_cache.update(at=now, key=key, value=out)
     return out
@@ -1138,7 +1247,8 @@ def sparkline(points, width=320, height=48, fill=False,
             f'vector-effect="non-scaling-stroke"/></svg>')
 
 
-def tariff_block(tariff: dict, windows=(), off_peak_p=None) -> str:
+def tariff_block(tariff: dict, windows=(), off_peak_p=None,
+                 covered=()) -> str:
     """Price and SOC for today, which is the question this project asks.
 
     The import series comes from Sigen, which knows only the static
@@ -1187,7 +1297,8 @@ def tariff_block(tariff: dict, windows=(), off_peak_p=None) -> str:
             f'<div class="sline g-{tone}">{sparkline(points, fill=True)}{hover_bands(points, fmt)}</div>'
             f'<div class="snow">{now}</div>'
             f'</div>')
-    if not rows:
+    rows.insert(0, schedule_row(windows, covered))
+    if len(rows) == 1:
         return '<p class="empty">No tariff series for today yet.</p>'
     if any(" *" in row for row in rows):
         # Say that the line is not Sigen's own, and why. A silently rewritten
@@ -1507,7 +1618,28 @@ nav a.on {{ background:var(--cheap); color:#04231a; border-color:var(--cheap);
   background:currentColor; opacity:0; }}
 .band:hover::before {{ opacity:.16; }}
 .g-peak {{ color:var(--peak); }} .g-cheap {{ color:var(--cheap); }}
-.g-batt {{ color:var(--batt); }}
+.g-batt {{ color:var(--batt); }} .g-muted {{ color:var(--muted); }}
+
+/* The IOG schedule strip. A solid block asserts the period WAS off-peak;
+   hatching says Octopus planned it and the car has not confirmed, which is
+   peak-rate electricity with an option on being cheap. --cheap is a reserved
+   status colour, and this is the row it is reserved for. */
+.schedline {{ height:15px; border-radius:4px; background:var(--line); }}
+.seg {{ position:absolute; top:0; bottom:0; border-radius:3px;
+  cursor:crosshair; }}
+.s-guar {{ background:var(--cheap); opacity:.32; }}
+.s-conf {{ background:var(--cheap); }}
+.s-plan {{ background:repeating-linear-gradient(135deg,
+    var(--cheap) 0 3px, transparent 3px 7px);
+  box-shadow:inset 0 0 0 1px rgba(63,185,140,.55); }}
+.seg b {{ position:absolute; bottom:calc(100% + 6px); left:0;
+  white-space:nowrap; background:var(--text); color:var(--bg);
+  font-size:.78rem; font-weight:700; padding:.22rem .45rem;
+  border-radius:5px; opacity:0; pointer-events:none; transition:opacity .1s;
+  z-index:5; }}
+.seg:hover b {{ opacity:1; }}
+.nowline {{ position:absolute; top:-4px; bottom:-4px; width:2px;
+  background:var(--text); border-radius:1px; pointer-events:none; }}
 
 .slot {{ display:flex; justify-content:space-between; gap:.6rem;
   padding:.36rem 0; border-bottom:1px solid var(--line); font-size:.85rem;
@@ -1568,7 +1700,9 @@ footer code {{ font-size:.95em; }}
   <div>
     {('<div class="panel"><h2>Today</h2>'
       + tariff_block(tariff, (snap.get("agent") or {}).get("bonus_windows") or (),
-                     snap.get("off_peak_p")) + '</div>')
+                     snap.get("off_peak_p"),
+                     (snap.get("agent") or {}).get("covered_windows") or ())
+      + '</div>')
      if tariff else ''}
     <div class="panel">
       <h2>Agent &amp; cheap slots</h2>
