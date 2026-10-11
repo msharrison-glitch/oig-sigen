@@ -426,6 +426,11 @@ SCHEDULE_EVENT = re.compile(
     r"(\d{2}):(\d{2})\s*->\s*(\d{2}):(\d{2})")
 
 
+# How far a slot's start may trail its log line before it is next day's.
+# See the reasoning in dispatch_coverage.
+NEXT_DAY_GAP = timedelta(hours=2)
+
+
 def dispatch_coverage(lines) -> list:
     """When a dispatch was actually in force, from the agent's log.
 
@@ -459,6 +464,19 @@ def dispatch_coverage(lines) -> list:
         kind, sh, sm, eh, em = event.groups()
         start = when.replace(hour=int(sh), minute=int(sm), second=0,
                              microsecond=0)
+        # A slot logged LONG after its own clock time belongs to TOMORROW.
+        # Octopus publishes the next morning's dispatches late the previous
+        # evening, so "+ added 08:00 -> 08:30" at 19:25 is 08:00 tomorrow --
+        # dating it to today puts a block thirteen hours in the past and
+        # paints a period that never happened.
+        #
+        # A start may legitimately PRECEDE its log line, but only by about an
+        # hour: the agent logs a slot TRIMMED TO NOW when it first meets one
+        # mid-slot (up to 30 min in) and the snap-back below moves the start
+        # up to 29 min earlier again. Two hours clears that with margin and
+        # is far short of the gaps a next-day slot produces.
+        if when - start > NEXT_DAY_GAP:
+            start += timedelta(days=1)
         end = start.replace(hour=int(eh), minute=int(em))
         if end <= start:                          # crosses midnight
             end += timedelta(days=1)

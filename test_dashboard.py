@@ -774,6 +774,49 @@ def main() -> int:
           dashboard.dispatch_coverage(live_log)[0][1],
           dt.datetime(2026, 9, 15, 23, 30))
 
+    print("\nA slot logged long after its clock time belongs to TOMORROW")
+    # Octopus publishes the next morning's dispatches late the previous
+    # evening. Observed live on 2026-10-11: "+ added 08:00 -> 08:30" at
+    # 19:25. Dated to today that is a block thirteen hours in the PAST, and
+    # it would paint a period that never happened -- on the schedule strip,
+    # and, whenever such a span merges with a real one, in the money figures.
+    nextday = ["2026-10-11 19:25:22 INFO    SCHEDULE + added   08:00 -> 08:30 [dispatch]"]
+    check("an evening-logged morning slot rolls to the next day",
+          dashboard.dispatch_coverage(nextday)[0][0],
+          dt.datetime(2026, 10, 12, 8, 0))
+    check("and so does its end",
+          dashboard.dispatch_coverage(nextday)[0][1],
+          dt.datetime(2026, 10, 12, 8, 30))
+
+    # Both edges, because the threshold is the whole fix. A start may
+    # legitimately precede its log line -- TRIMMED TO NOW puts the agent up
+    # to 30 min into a slot, and the snap-back to the half hour moves the
+    # start up to 29 min earlier again -- so ~59 min is the honest maximum.
+    same_day = ["2026-10-11 20:20:00 INFO    SCHEDULE + added   19:30 -> 21:00 [dispatch]"]
+    check("a slot 50 min behind its log line is still today",
+          dashboard.dispatch_coverage(same_day)[0][0],
+          dt.datetime(2026, 10, 11, 19, 30))
+    rolled = ["2026-10-11 20:20:00 INFO    SCHEDULE + added   17:00 -> 18:00 [dispatch]"]
+    check("three hours behind is tomorrow",
+          dashboard.dispatch_coverage(rolled)[0][0],
+          dt.datetime(2026, 10, 12, 17, 0))
+
+    # The midnight crossing must survive the roll: an end earlier than its
+    # start is still the following day, counted from the rolled start.
+    crossing = ["2026-10-11 22:50:00 INFO    SCHEDULE + added   23:00 -> 01:00 [dispatch]"]
+    span = dashboard.dispatch_coverage(crossing)[0]
+    check("a slot crossing midnight starts tonight",
+          span[0], dt.datetime(2026, 10, 11, 23, 0))
+    check("and ends tomorrow", span[1], dt.datetime(2026, 10, 12, 1, 0))
+
+    # Two slots with the SAME clock time, one today and one tomorrow, must
+    # stay apart -- that is what the live 2026-10-11 log actually contained.
+    pair = ["2026-10-11 07:30:00 INFO    SCHEDULE + added   09:30 -> 10:00 [dispatch]",
+            "2026-10-11 19:25:00 INFO    SCHEDULE + added   09:30 -> 10:00 [dispatch]"]
+    days = sorted({a.date() for a, _ in dashboard.dispatch_coverage(pair)})
+    check("today's and tomorrow's 09:30 slot do not merge into one",
+          days, [dt.date(2026, 10, 11), dt.date(2026, 10, 12)])
+
     print("\nbonus_status reads the agent's verdict, and distrusts stale ones")
     at = dt.datetime(2026, 9, 15, 21, 0, 0)
 
