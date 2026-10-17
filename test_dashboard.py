@@ -912,6 +912,21 @@ def main() -> int:
     check("nothing is drawn past the right-hand edge of the day",
           widest <= 100.0001, True)
 
+    # The strip's data is the AGENT's, not Sigen's, so losing the cloud must
+    # not take it with it. Shipped the other way on 2026-10-17 and the row
+    # vanished the first time the tariff fetch failed -- when the page had
+    # least else to say.
+    conf2 = [(dt.datetime(2026, 10, 11, 19, 30), dt.datetime(2026, 10, 11, 20, 0))]
+    cov2 = [(dt.datetime(2026, 10, 11, 19, 30), dt.datetime(2026, 10, 11, 23, 30))]
+    for label, tar in (("no tariff at all", {}),
+                       ("a tariff error", {"error": "cloud unreachable"})):
+        block = dashboard.tariff_block(tar, conf2, 4.279, cov2)
+        check(f"the schedule strip survives {label}",
+              "IOG schedule" in block, True)
+    check("and a tariff error is still reported",
+          "unreachable" in dashboard.tariff_block(
+              {"error": "cloud unreachable"}, conf2, 4.279, cov2), True)
+
     check("subtract_spans removes the covered part",
           dashboard.subtract_spans(
               [(dt.datetime(2026, 10, 11, 1, 0), dt.datetime(2026, 10, 11, 5, 0))],
@@ -1057,8 +1072,16 @@ def main() -> int:
     check("an unavailable series degrades",
           "unavailable" in dashboard.tariff_block({"error": "TimeoutError"}),
           True)
-    check("no tariff data at all is empty, not broken",
-          dashboard.tariff_block({}), "")
+    # CHANGED 2026-10-17, deliberately. This used to assert "" -- correct
+    # while every row came from Sigen. The IOG schedule strip does not: it is
+    # built from the agent's own log, so it has to outlive the cloud. What
+    # must still hold is that nothing PRETENDS to have Sigen's data.
+    no_tariff = dashboard.tariff_block({})
+    check("no tariff data still gives the strip, which is ours",
+          "IOG schedule" in no_tariff, True)
+    check("and says plainly that Sigen's series are missing",
+          "No tariff series" in no_tariff, True)
+    check("without inventing a price", "p</div>" in no_tariff, False)
 
     print("\nPlug history is DIFFERENCED, because a plug only counts upwards")
     # A Shelly plug exposes a lifetime kWh counter and nothing else -- no

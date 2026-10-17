@@ -1282,12 +1282,17 @@ def tariff_block(tariff: dict, windows=(), off_peak_p=None,
     23:30-05:30 schedule -- so every bonus slot draws at peak unless the
     agent's own record corrects it. Same evidence as the price card.
     """
-    if not tariff:
-        return ""
+    # The schedule strip is OURS -- every segment comes from the agent's own
+    # log -- so it must survive Sigen being unreachable. It was first written
+    # behind these guards, which made the one row we can always compute
+    # disappear exactly when the cloud was down and the page was least
+    # informative. The guaranteed window alone always draws something.
+    tariff = tariff or {}
+    rows = [schedule_row(windows, covered)]
     if tariff.get("error"):
-        return (f'<p class="empty">Tariff history unavailable &mdash; '
-                f'{escape(tariff["error"])}</p>')
-    rows = []
+        rows.append(f'<p class="empty">Tariff history unavailable &mdash; '
+                    f'{escape(tariff["error"])}</p>')
+        return "".join(rows)
     def pence(v):
         return f"{v * 100:.2f}p"
 
@@ -1324,9 +1329,8 @@ def tariff_block(tariff: dict, windows=(), off_peak_p=None,
             f'<div class="sline g-{tone}">{sparkline(points, fill=True)}{hover_bands(points, fmt)}</div>'
             f'<div class="snow">{now}</div>'
             f'</div>')
-    rows.insert(0, schedule_row(windows, covered))
-    if len(rows) == 1:
-        return '<p class="empty">No tariff series for today yet.</p>'
+    if len(rows) == 1:          # the strip, and nothing from Sigen
+        rows.append('<p class="empty">No tariff series for today yet.</p>')
     if any(" *" in row for row in rows):
         # Say that the line is not Sigen's own, and why. A silently rewritten
         # price would be indistinguishable from Sigen having understood IOG.
@@ -1729,8 +1733,7 @@ footer code {{ font-size:.95em; }}
       + tariff_block(tariff, (snap.get("agent") or {}).get("bonus_windows") or (),
                      snap.get("off_peak_p"),
                      (snap.get("agent") or {}).get("covered_windows") or ())
-      + '</div>')
-     if tariff else ''}
+      + '</div>')}
     <div class="panel">
       <h2>Agent &amp; cheap slots</h2>
       {agent_block(snap['agent'])}
