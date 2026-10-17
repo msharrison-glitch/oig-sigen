@@ -58,14 +58,17 @@ import sys
 import urllib.parse
 import urllib.request
 
+import config
 from config import ConfigError, load_env, log_files
 
 API = "https://api.octopus.energy/v1"
 TIMEOUT = 30.0
 
 # Same defaults and overrides as watch.py, so one .env drives both.
-DEFAULT_OFF_PEAK_P = 4.49
-DEFAULT_PEAK_P = 29.757
+# Re-exported from config so dashboard.py's costs.DEFAULT_OFF_PEAK_P keeps
+# working and there is exactly one place these live.
+DEFAULT_OFF_PEAK_P = config.DEFAULT_OFF_PEAK_P
+DEFAULT_PEAK_P = config.DEFAULT_PEAK_P
 
 # The window IOG guarantees regardless of dispatches, local time.
 GUARANTEED = (dt.time(23, 30), dt.time(5, 30))
@@ -90,18 +93,15 @@ class CostError(RuntimeError):
 
 
 def rates_from_env() -> tuple:
-    try:
-        env = load_env()
-    except ConfigError:
-        return DEFAULT_OFF_PEAK_P, DEFAULT_PEAK_P
+    """The rates in force TODAY.
 
-    def rate(key, default):
-        try:
-            return float(env.get(key, "") or default)
-        except ValueError:
-            return default
-    return (rate("IOG_OFF_PEAK_P", DEFAULT_OFF_PEAK_P),
-            rate("IOG_PEAK_P", DEFAULT_PEAK_P))
+    Rates change, so there is no such thing as "the" rate -- only the rate
+    on a given day. This is the one callers want who are pricing the
+    present: the dashboard re-pricing today's bonus slots, watch.py costing
+    tonight. Anything pricing a RANGE must use config.rate_schedule(), or it
+    will price every day in that range at today's rate.
+    """
+    return config.rates_at(config.rate_schedule(), dt.date.today())
 
 
 def _get(path: str, key: str) -> dict:
@@ -253,12 +253,17 @@ def is_cheap(moment, windows) -> bool:
     return any(a <= naive < b for a, b in windows)
 
 
-def summarise(imported, exported, rates, windows, off_p, peak_p) -> dict:
-    """Money. Everything above this line is measurement."""
+def summarise(imported, exported, rates, windows, schedule) -> dict:
+    """Money. Everything above this line is measurement.
+
+    Every half hour is priced at the rate in force on ITS OWN date, never at
+    one rate for the whole range. See config.rate_schedule for why.
+    """
     cheap_kwh = peak_kwh = 0.0
     cost_p = 0.0
     for when, kwh in imported.items():
         local = when.astimezone()
+        off_p, peak_p = config.rates_at(schedule, local)
         if is_cheap(local, windows):
             cheap_kwh += kwh
             cost_p += kwh * off_p
@@ -291,7 +296,9 @@ def summarise(imported, exported, rates, windows, off_p, peak_p) -> dict:
         # imported the same kilowatt-hours at all, it would have imported
         # less and at different times. Useful as an order of magnitude for
         # "what is the cheap window worth", not as a savings claim.
-        "vs_all_peak": cheap_kwh * (peak_p - off_p) / 100.0,
+        # Priced at the LATEST rates in the range: the spread a reader is
+        # weighing now, not an average of the ones that have been.
+        "vs_all_peak": cheap_kwh * (schedule[-1][2] - schedule[-1][1]) / 100.0,
         # Import and export settle SEPARATELY. Counting only import made the
         # page report "0% settled" beside a real export figure, because today
         # had export rows and no import rows yet.
@@ -305,7 +312,7 @@ def report(start_date, end_date, log_path="observe.log") -> dict:
     env = load_env()
     key = env["OCTOPUS_API_KEY"]
     account = env["OCTOPUS_ACCOUNT_NUMBER"]
-    off_p, peak_p = rates_from_env()
+    schedule = config.rate_schedule()
 
     local = dt.datetime.now().astimezone().tzinfo
     start = dt.datetime.combine(start_date, dt.time(0, 0), tzinfo=local)
@@ -336,11 +343,17 @@ def report(start_date, end_date, log_path="observe.log") -> dict:
             continue
     windows = dispatch_windows(lines)
 
-    out = summarise(imported, exported, rates, windows, off_p, peak_p)
+    out = summarise(imported, exported, rates, windows, schedule)
+    # The rates at the END of the range: what "off_peak_p" means to anything
+    # reading a single number, including the dashboard.
+    end_off, end_peak = config.rates_at(schedule, end_date)
     out.update({"start": start_date, "end": end_date,
                 "import_tariff": points["import"]["tariff"],
                 "export_tariff": points.get("export", {}).get("tariff"),
-                "off_peak_p": off_p, "peak_p": peak_p,
+                "off_peak_p": end_off, "peak_p": end_peak,
+                # Carried AND printed: a dropped or mistyped entry has to
+                # look like a missing row, not a quietly wrong total.
+                "rate_periods": [[str(d), o, pk] for d, o, pk in schedule],
                 "dispatch_windows": len(windows)})
     return out
 
@@ -378,10 +391,8 @@ def main() -> int:
     print("-" * 62)
     print(f"  imported        {data['import_kwh']:8.2f} kWh   "
           f"GBP {data['import_cost']:7.2f}")
-    print(f"     at off-peak  {data['cheap_kwh']:8.2f} kWh   "
-          f"@ {data['off_peak_p']:.2f}p")
-    print(f"     at peak      {data['peak_kwh']:8.2f} kWh   "
-          f"@ {data['peak_p']:.3f}p")
+    print(f"     at off-peak  {data['cheap_kwh']:8.2f} kWh")
+    print(f"     at peak      {data['peak_kwh']:8.2f} kWh")
     print(f"  exported        {data['export_kwh']:8.2f} kWh   "
           f"GBP {data['export_income']:7.2f}")
     if data["export_unpriced_kwh"]:
@@ -393,6 +404,9 @@ def main() -> int:
           f"   (counterfactual, upper bound)")
     print(f"\n  import {data['import_tariff']}")
     print(f"  export {data['export_tariff']}")
+    for i, (when, off, peak) in enumerate(data.get("rate_periods") or []):
+        since = "baseline" if i == 0 else f"from {when}"
+        print(f"  rates {since:<16} {off:>8.4f}p off-peak  {peak:>8.4f}p peak")
     print(f"  {data['dispatch_windows']} dispatch window(s) from the agent log")
     print("  standing charges are NOT included\n")
     return 0

@@ -96,7 +96,8 @@ def main() -> int:
                 base + 4 * half: 2.0}             # 23:00, not cheap
     exported = {base: 5.0, base + 4 * half: 5.0}
     rates = {base: 20.0}                          # only one half hour priced
-    out = costs.summarise(imported, exported, rates, windows, 4.49, 29.757)
+    flat = [(dt.date.min, 4.49, 29.757)]        # one rate, as before
+    out = costs.summarise(imported, exported, rates, windows, flat)
     check("cheap kWh identified", out["cheap_kwh"], 10.0)
     check("peak kWh identified", out["peak_kwh"], 2.0)
     check("import cost mixes both rates",
@@ -112,10 +113,68 @@ def main() -> int:
           round(out["vs_all_peak"], 4), round(10 * (29.757 - 4.49) / 100, 4))
 
     print("\nNo meter data is zero, not a crash")
-    empty = costs.summarise({}, {}, {}, windows, 4.49, 29.757)
+    empty = costs.summarise({}, {}, {}, windows, flat)
     check("no import", empty["import_cost"], 0.0)
     check("no export", empty["export_income"], 0.0)
     check("no half hours", empty["half_hours"], 0)
+
+    print("\nA range spanning a rate change prices each day at its own rate")
+    # The bug this exists to stop: one scalar rate silently re-pricing
+    # history. "This month" and "last 7 days" both straddled 2026-10-01,
+    # when VAT on domestic electricity went to zero, and 2026-10-31, when
+    # this account's tariff was re-priced. Editing one number would have
+    # priced September at November's rates -- no error, just a wrong total.
+    schedule = [(dt.date.min, 4.49, 29.757),
+                (dt.date(2026, 10, 1), 4.279, 28.3429),
+                (dt.date(2026, 10, 31), 7.6, 34.955)]
+
+    def cheap_at(day, kwh):
+        """One off-peak half hour inside the guaranteed window, that day."""
+        return {dt.datetime(day.year, day.month, day.day, 2, 0,
+                            tzinfo=tz): kwh}
+
+    for day, rate in ((dt.date(2026, 9, 30), 4.49),
+                      (dt.date(2026, 10, 1), 4.279),
+                      (dt.date(2026, 10, 30), 4.279),
+                      (dt.date(2026, 10, 31), 7.6)):
+        got = costs.summarise(cheap_at(day, 10.0), {}, {}, [], schedule)
+        check(f"{day} prices at {rate}p",
+              round(got["import_cost"], 6), round(10 * rate / 100, 6))
+
+    spanning = {}
+    spanning.update(cheap_at(dt.date(2026, 9, 30), 10.0))
+    spanning.update(cheap_at(dt.date(2026, 10, 2), 10.0))
+    spanning.update(cheap_at(dt.date(2026, 11, 2), 10.0))
+    got = costs.summarise(spanning, {}, {}, [], schedule)
+    check("a range crossing BOTH changes sums three different rates",
+          round(got["import_cost"], 6),
+          round((10 * 4.49 + 10 * 4.279 + 10 * 7.6) / 100, 6))
+
+    print("\nThe schedule parses, and a typo cannot quietly change a rate")
+    import config as _cfg
+    check("no IOG_RATE_CHANGES is the old single-rate behaviour",
+          _cfg.rate_schedule({"IOG_OFF_PEAK_P": "4.49", "IOG_PEAK_P": "29.757"}),
+          [(dt.date.min, 4.49, 29.757)])
+    parsed = _cfg.rate_schedule({
+        "IOG_RATE_CHANGES": "2026-10-01:4.279/28.3429, 2026-10-31:7.6/34.955"})
+    check("two changes become three periods, oldest first",
+          [str(d) for d, _, _ in parsed],
+          ["0001-01-01", "2026-10-01", "2026-10-31"])
+    # A malformed entry is dropped rather than raised on, because the
+    # dashboard must degrade -- but it must not take the good ones with it,
+    # and costs.py prints every period so a missing row is visible.
+    messy = _cfg.rate_schedule({"IOG_RATE_CHANGES":
+                                "not-a-date:1/2, 2026-10-31:7.6/34.955"})
+    check("a malformed entry is skipped, the valid one survives",
+          [str(d) for d, _, _ in messy], ["0001-01-01", "2026-10-31"])
+    check("and the baseline is never dropped with it",
+          messy[0][1:], (_cfg.DEFAULT_OFF_PEAK_P, _cfg.DEFAULT_PEAK_P))
+    check("a date before everything gets the baseline",
+          _cfg.rates_at(parsed, dt.date(2000, 1, 1)), (4.49, 29.757))
+    check("order in the env does not matter",
+          _cfg.rate_schedule({"IOG_RATE_CHANGES":
+                              "2026-10-31:7.6/34.955, 2026-10-01:4.279/28.3429"}),
+          parsed)
 
     print("\nOctopus mixes Z and +01:00 in the same API")
     check("a Z timestamp parses on Python 3.9",

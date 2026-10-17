@@ -11,9 +11,94 @@ Stdlib only, like everything else here.
 from __future__ import annotations
 
 import os
+from datetime import date
 from pathlib import Path
 
 ENV_FILE = Path(__file__).with_name(".env")
+
+
+# IOG import unit rates, pence per kWh, AS CHARGED -- whatever VAT is in
+# force at the time is already in these numbers.
+#
+# These two are the BASELINE: the rate before any change in IOG_RATE_CHANGES.
+# They still read 4.49/29.757 because that is what this account paid until
+# 2026-10-01, when VAT on domestic electricity went to zero.
+DEFAULT_OFF_PEAK_P = 4.49
+DEFAULT_PEAK_P = 29.757
+
+
+def rate_schedule(env=None) -> list:
+    """Import rates with the date each took effect, oldest first.
+
+    A SINGLE pair of rates cannot price a range that spans a change, and
+    this project's ranges routinely do -- "this month" and "last 7 days"
+    both straddled 2026-10-01, when VAT on domestic electricity went to
+    zero, and 2026-10-31, when this account's tariff was re-priced. Editing
+    one scalar would have silently re-priced September at November's rates:
+    no error, no empty result, just a wrong number in a column of money.
+
+    Export never needed this because Agile Outgoing is already fetched per
+    half hour; import is the side that was a constant. This gives it the
+    same shape.
+
+    IOG_RATE_CHANGES is a comma or semicolon separated list of
+    `YYYY-MM-DD:off/peak`, each taking effect at LOCAL MIDNIGHT on that date:
+
+        IOG_RATE_CHANGES=2026-10-01:4.279/28.3429, 2026-10-31:7.6/34.955
+
+    A malformed entry is skipped rather than raised on, because the
+    dashboard must degrade rather than die -- but costs.py prints every
+    period it is using, so a dropped entry shows up as a missing row rather
+    than as a quietly wrong total.
+    """
+    if env is None:
+        try:
+            env = load_env()
+        except ConfigError:
+            env = {}
+
+    def number(key, default):
+        try:
+            return float(env.get(key, "") or default)
+        except ValueError:
+            return default
+
+    schedule = [(date.min,
+                 number("IOG_OFF_PEAK_P", DEFAULT_OFF_PEAK_P),
+                 number("IOG_PEAK_P", DEFAULT_PEAK_P))]
+
+    raw = (env.get("IOG_RATE_CHANGES") or "").replace(";", ",")
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            when, pair = item.split(":", 1)
+            off, peak = pair.split("/", 1)
+            schedule.append((date.fromisoformat(when.strip()),
+                             float(off), float(peak)))
+        except ValueError:
+            continue              # skipped, and visible in costs.py's output
+    schedule.sort(key=lambda row: row[0])
+    return schedule
+
+
+def rates_at(schedule, when) -> tuple:
+    """The (off-peak, peak) rates in force on that LOCAL date.
+
+    Boundaries are local midnight, so this compares dates and never does
+    timezone arithmetic -- which is also why it cannot be caught out by a
+    host whose zone is Europe/Dublin rather than Europe/London.
+    """
+    if hasattr(when, "date"):
+        when = when.date()
+    chosen = schedule[0]
+    for row in schedule:
+        if row[0] <= when:
+            chosen = row
+        else:
+            break
+    return chosen[1], chosen[2]
 
 
 # Floor for any configured poll interval. Below roughly this, most of the
@@ -29,7 +114,7 @@ class ConfigError(RuntimeError):
 # Keys we will take from the process environment. Anything else has to come
 # from .env, so a stray shell variable can never silently become config.
 ENV_KEYS = ("OCTOPUS_API_KEY", "OCTOPUS_ACCOUNT_NUMBER", "SIGEN_HOST",
-            "IOG_OFF_PEAK_P", "IOG_PEAK_P",
+            "IOG_OFF_PEAK_P", "IOG_PEAK_P", "IOG_RATE_CHANGES",
             "IOG_POLL_IDLE_SECONDS", "IOG_POLL_CHARGING_SECONDS",
             "IOG_RESUME_BAND_PCT", "IOG_RESTORE_MODE",
             "IOG_RESTORE_PROFILE", "IOG_STATE_DIR",

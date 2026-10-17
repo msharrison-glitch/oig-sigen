@@ -27,9 +27,10 @@ import csv
 import signal
 import sys
 import time
-from datetime import datetime, time as dtime, timedelta, timezone
+from datetime import date, datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 
+import config
 import registers as R
 from config import ConfigError, load_env, resolve_host
 from octopus import LOCAL_TZ, OctopusClient, OctopusError, Slot, off_peak_windows, merge
@@ -38,22 +39,19 @@ from sigen import ModbusError, SigenClient
 # IOG rates in pence per kWh. These vary by DNO region, so they come from
 # .env rather than being baked in -- anyone else running this has different
 # numbers, and a summary quoting the wrong ones is worse than no summary.
-DEFAULT_OFF_PEAK_P = 4.49
-DEFAULT_PEAK_P = 29.757
+DEFAULT_OFF_PEAK_P = config.DEFAULT_OFF_PEAK_P
+DEFAULT_PEAK_P = config.DEFAULT_PEAK_P
 
 
 def tariff_rates() -> tuple[float, float]:
-    try:
-        env = load_env()
-    except ConfigError:
-        return DEFAULT_OFF_PEAK_P, DEFAULT_PEAK_P
-    def rate(key, default):
-        try:
-            return float(env.get(key, "") or default)
-        except ValueError:
-            return default
-    return (rate("IOG_OFF_PEAK_P", DEFAULT_OFF_PEAK_P),
-            rate("IOG_PEAK_P", DEFAULT_PEAK_P))
+    """The rates in force TODAY.
+
+    This tool costs ONE night, so a single pair is the right answer -- but
+    it takes them from the shared schedule so it cannot drift from costs.py
+    when a rate changes, which is how two tools end up quoting different
+    numbers for the same night.
+    """
+    return config.rates_at(config.rate_schedule(), date.today())
 
 FIELDS = ["utc", "local", "cheap", "soc_pct", "ess_kw", "grid_kw", "pv_kw",
           "ems_enable", "ems_mode", "charge_limit_kw", "discharge_limit_kw",

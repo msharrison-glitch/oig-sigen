@@ -311,7 +311,8 @@ def main() -> int:
     # Today had export rows and no import rows, so counting import alone
     # printed "0% settled" beside a real export figure.
     import costs as _c
-    out = _c.summarise({}, {dt.datetime.now(): 3.93}, {}, [], 4.49, 29.757)
+    out = _c.summarise({}, {dt.datetime.now(): 3.93}, {}, [],
+                       [(dt.date.min, 4.49, 29.757)])
     check("export-only data is not reported as zero coverage",
           out["half_hours"], 1)
     check("and the two series are countable separately",
