@@ -1247,6 +1247,173 @@ def main() -> int:
         check("a deleted file is empty again",
               dashboard.load_shelly_history(hp), [])
 
+    print("\nFinished days are kept, so a report never re-asks for them")
+    import os as _os2, tempfile as _tf, types as _ty
+    TODAY = dt.date(2026, 10, 18)
+
+    with _tf.TemporaryDirectory() as tmp:
+        sp = _os2.path.join(tmp, "d.json")
+        st = dashboard.DayStore(sp)
+        st.put_many("sigen", {"2026-10-01": {"a": 1.0}})
+        check("a kept record round-trips through a fresh store",
+              dashboard.DayStore(sp).get("sigen", "2026-10-01"), {"a": 1.0})
+        st.put_many("costs", {"2026-10-01": {"n": 1}}, fp="AAA")
+        check("a matching fingerprint is served",
+              dashboard.DayStore(sp).get("costs", "2026-10-01", "AAA"), {"n": 1})
+        check("a different fingerprint is NOT (rates or logic changed)",
+              dashboard.DayStore(sp).get("costs", "2026-10-01", "BBB"), None)
+        open(sp, "w").write("{not json")
+        check("a corrupt file is empty, not an error",
+              dashboard.DayStore(sp).get("sigen", "2026-10-01"), None)
+        bad = dashboard.DayStore(_os2.path.join(tmp, "no", "such", "d.json"))
+        bad.put_many("sigen", {"k": {"a": 1}})
+        check("an unwritable path degrades quietly", True, True)
+        check("and leaves no temp file behind",
+              [f for f in _os2.listdir(tmp) if f.endswith(".tmp")], [])
+
+    # ---- costs
+    import costs as _costs
+    class FakeCosts:
+        calls = []
+    def day_row(day, settled, kwh=1.0):
+        return {"import_kwh": kwh, "cheap_kwh": kwh, "peak_kwh": 0.0,
+                "import_cost": kwh * 0.05, "export_kwh": 0.0,
+                "export_unpriced_kwh": 0.0, "export_income": 0.0,
+                "net": kwh * 0.05, "import_half_hours": 48,
+                "export_half_hours": 48, "settled": settled, "expected": 48}
+    def make_fetch(settled_days):
+        calls = []
+        def fetch(a, b, log):
+            calls.append((a, b))
+            out, d = {}, a
+            while d <= b:
+                out[d] = day_row(d, d in settled_days)
+                d += dt.timedelta(days=1)
+            return out
+        return fetch, calls
+
+    with _tf.TemporaryDirectory() as tmp:
+        st = dashboard.DayStore(_os2.path.join(tmp, "d.json"))
+        span = (dt.date(2026, 10, 12), dt.date(2026, 10, 18))
+        settled = {dt.date(2026, 10, n) for n in range(12, 17)}   # 12..16
+        fetch, calls = make_fetch(settled)
+        first = dashboard.report_costs(*span, "x", store=st, today=TODAY,
+                                       fetch=fetch)
+        check("first look asks for the whole span", calls, [span])
+        check("and sums all seven days", round(first["import_kwh"], 6), 7.0)
+        second = dashboard.report_costs(*span, "x", store=st, today=TODAY,
+                                        fetch=fetch)
+        check("the second look re-asks only the unsettled tail",
+              calls[1], (dt.date(2026, 10, 17), dt.date(2026, 10, 18)))
+        check("and the total is unchanged", second["import_kwh"],
+              first["import_kwh"])
+        check("yesterday, unsettled, was not kept",
+              st.get("costs", "2026-10-17", _costs.fingerprint()), None)
+        check("today is never kept, even if reported settled",
+              dashboard.report_costs(
+                  dt.date(2026, 10, 18), dt.date(2026, 10, 18), "x", store=st,
+                  today=TODAY, fetch=make_fetch({TODAY})[0]) is not None
+              and st.get("costs", "2026-10-18", _costs.fingerprint()), None)
+        fetch2, calls2 = make_fetch(settled)
+        old = _costs.fingerprint
+        _costs.fingerprint = lambda: "CHANGED"
+        try:
+            dashboard.report_costs(*span, "x", store=st, today=TODAY,
+                                   fetch=fetch2)
+        finally:
+            _costs.fingerprint = old
+        check("changed rates/logic recompute the kept days", calls2[0], span)
+        boom = dashboard.report_costs(
+            *span, "x", store=dashboard.DayStore(_os2.path.join(tmp, "e.json")),
+            today=TODAY, fetch=lambda a, b, l: 1 / 0)
+        check("a failure is reported, not raised", "error" in boom, True)
+        check("and nothing is kept from it",
+              dashboard.DayStore(_os2.path.join(tmp, "e.json")).get(
+                  "costs", "2026-10-12", _costs.fingerprint()), None)
+
+    # ---- sigen
+    class FakeSigen:
+        def __init__(self, card=None): self.n = 0; self.card = card
+        station_id = "S"
+        def _call(self, method, path):
+            self.n += 1
+            return {"data": {"stationCards": [
+                {"cardKey": "x", "value": 2.0}] if self.card is None
+                else self.card}}
+    fs = FakeSigen()
+    real_shared = dashboard.shared_sigen_client
+    dashboard.shared_sigen_client = lambda: fs
+    try:
+        with _tf.TemporaryDirectory() as tmp:
+            st = dashboard.DayStore(_os2.path.join(tmp, "d.json"))
+            sp7 = (dt.date(2026, 10, 12), dt.date(2026, 10, 18))
+            got = dashboard.report_sigen(*sp7, "last7", store=st, today=TODAY)
+            check("a week sums seven days", got["x"], 14.0)
+            check("and makes seven calls the first time", fs.n, 7)
+            fs.n = 0
+            dashboard.report_sigen(*sp7, "last7", store=st, today=TODAY)
+            check("then only the last two days (a 2-day margin for backfill)",
+                  fs.n, 2)
+            fs.n = 0
+            dashboard.report_sigen(dt.date(2026, 10, 12), dt.date(2026, 10, 12),
+                                   "day", store=st, today=TODAY)
+            check("a kept day makes no call at all", fs.n, 0)
+            dashboard.report_sigen(dt.date(2026, 9, 1), dt.date(2026, 9, 30),
+                                   "month", store=st, today=TODAY)
+            fs.n = 0
+            dashboard.report_sigen(dt.date(2026, 9, 1), dt.date(2026, 9, 30),
+                                   "month", store=st, today=TODAY)
+            check("a finished month is one stored record", fs.n, 0)
+            fs.n = 0
+            dashboard.report_sigen(dt.date(2026, 10, 1), dt.date(2026, 10, 18),
+                                   "month", store=st, today=TODAY)
+            dashboard.report_sigen(dt.date(2026, 10, 1), dt.date(2026, 10, 18),
+                                   "month", store=st, today=TODAY)
+            check("this month, in progress, is never kept", fs.n, 2)
+            empty = FakeSigen(card=[])
+            dashboard.shared_sigen_client = lambda: empty
+            dashboard.report_sigen(dt.date(2026, 8, 1), dt.date(2026, 8, 1),
+                                   "day", store=st, today=TODAY)
+            check("an empty answer is not kept as a zero",
+                  st.get("sigen", "2026-08-01"), None)
+    finally:
+        dashboard.shared_sigen_client = real_shared
+
+    # ---- zappi
+    class FakeZappi:
+        serial = "Z"
+        def __init__(self, rows): self.rows = rows; self.n = 0
+        def _get(self, path):
+            self.n += 1
+            return {"U1": self.rows}
+    full = [{"hr": 0, "h1b": 3600000}] + [{"min": i} for i in range(1400)]
+    with _tf.TemporaryDirectory() as tmp:
+        st = dashboard.DayStore(_os2.path.join(tmp, "d.json"))
+        fz = FakeZappi(full)
+        r1 = dashboard.report_zappi(dt.date(2026, 10, 15), dt.date(2026, 10, 18),
+                                    store=st, today=TODAY, client=fz)
+        check("four days asked", fz.n, 4)
+        fz.n = 0
+        r2 = dashboard.report_zappi(dt.date(2026, 10, 15), dt.date(2026, 10, 18),
+                                    store=st, today=TODAY, client=fz)
+        check("only today is re-asked (finished days are kept)", fz.n, 1)
+        check("and the total is the same", r2["total"], r1["total"])
+        short = FakeZappi([{"hr": 0}] * 5)
+        dashboard.report_zappi(dt.date(2026, 10, 1), dt.date(2026, 10, 1),
+                               store=st, today=TODAY, client=short)
+        check("a week-old day with a gap IS kept (the charger was offline)",
+              st.get("zappi", "2026-10-01") is not None, True)
+        fresh_st = dashboard.DayStore(_os2.path.join(tmp, "fresh.json"))
+        dashboard.report_zappi(dt.date(2026, 10, 16), dt.date(2026, 10, 16),
+                               store=fresh_st, today=TODAY, client=short)
+        check("the same short answer from a RECENT day is not kept",
+              fresh_st.get("zappi", "2026-10-16"), None)
+        empty_z = FakeZappi([])
+        dashboard.report_zappi(dt.date(2026, 9, 1), dt.date(2026, 9, 1),
+                               store=fresh_st, today=TODAY, client=empty_z)
+        check("an EMPTY answer is never kept, however old",
+              fresh_st.get("zappi", "2026-09-01"), None)
+
     print("\nFormatting helpers")
     check("None power is a dash, not 0", dashboard.kw(None), "&mdash;")
     check("None watts is a dash", dashboard.watts(None), "&mdash;")

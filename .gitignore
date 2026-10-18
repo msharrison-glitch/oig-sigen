@@ -46,3 +46,5 @@ daikin-snapshot.log
 .shelly-history.jsonl
 .agent-state.json
 .agent-state.json.tmp
+.day-totals.json
+.day-totals.json.tmp

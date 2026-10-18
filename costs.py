@@ -51,12 +51,17 @@ from __future__ import annotations
 import argparse
 import base64
 import datetime as dt
+import hashlib
 import io
 import json
 import re
 import sys
+import threading
+import time
 import urllib.parse
 import urllib.request
+
+from concurrent.futures import ThreadPoolExecutor
 
 import config
 from config import ConfigError, load_env, log_files
@@ -308,32 +313,64 @@ def summarise(imported, exported, rates, windows, schedule) -> dict:
     }
 
 
-def report(start_date, end_date, log_path="observe.log") -> dict:
-    env = load_env()
-    key = env["OCTOPUS_API_KEY"]
-    account = env["OCTOPUS_ACCOUNT_NUMBER"]
-    schedule = config.rate_schedule()
+# The meter points change when you change supplier, not between page loads;
+# looking them up cost 0.7 s on every costing call.
+POINTS_TTL = 3600.0
+_points_cache: dict = {}
+_points_lock = threading.Lock()
 
+
+def cached_meter_points(key: str, account: str, now=None) -> dict:
+    now = time.monotonic() if now is None else now
+    with _points_lock:
+        hit = _points_cache.get(account)
+        if hit and now - hit[0] < POINTS_TTL:
+            return hit[1]
+    points = meter_points(key, account)
+    with _points_lock:
+        _points_cache[account] = (now, points)
+    return points
+
+
+def _local_bounds(start_date, end_date):
     local = dt.datetime.now().astimezone().tzinfo
     start = dt.datetime.combine(start_date, dt.time(0, 0), tzinfo=local)
     end = dt.datetime.combine(end_date + dt.timedelta(days=1),
                               dt.time(0, 0), tzinfo=local)
+    return start, end
 
-    points = meter_points(key, account)
-    if "import" not in points:
-        raise CostError("no live import agreement found on this account")
 
-    imported = consumption(points["import"]["mpan"],
-                           points["import"]["serials"], start, end, key)
-    exported = {}
-    rates = {}
-    if "export" in points:
-        exported = consumption(points["export"]["mpan"],
-                               points["export"]["serials"], start, end, key)
-        rates = agile_rates(points["export"]["tariff"], start, end, key)
+def _fetch_range(points, key, start, end):
+    """Import, export and the Agile rates for a range, FETCHED TOGETHER.
 
-    # Archives too: a rotated log would otherwise lose every dispatch older
-    # than the last rotation, and price those half hours at PEAK.
+    Each is one round trip of 0.5-1.7 s whatever the range -- a single day
+    costs about what a month does -- and they were made one after another.
+    """
+    export = "export" in points
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        imp = pool.submit(consumption, points["import"]["mpan"],
+                          points["import"]["serials"], start, end, key)
+        exp = rt = None
+        if export:
+            exp = pool.submit(consumption, points["export"]["mpan"],
+                              points["export"]["serials"], start, end, key)
+            rt = pool.submit(agile_rates, points["export"]["tariff"],
+                             start, end, key)
+        got = (imp.result(), exp.result() if exp else {},
+               rt.result() if rt else {})
+    # Octopus's period filter is INCLUSIVE of the end, so every range also
+    # returned the first half hour of the NEXT day: Last month carried
+    # 1 Oct 00:00 (9.19 kWh, GBP 0.39) as if it were September's. Half-open.
+    return tuple({w: v for w, v in series.items() if start <= w < end}
+                 for series in got)
+
+
+def read_windows(log_path) -> list:
+    """Dispatch windows from the agent log AND its rotated archives.
+
+    Archives too: a rotated log would otherwise lose every dispatch older
+    than the last rotation, and price those half hours at PEAK.
+    """
     lines = []
     for path in log_files(log_path):
         try:
@@ -341,7 +378,23 @@ def report(start_date, end_date, log_path="observe.log") -> dict:
                              errors="replace").readlines()
         except OSError:
             continue
-    windows = dispatch_windows(lines)
+    return dispatch_windows(lines)
+
+
+def report(start_date, end_date, log_path="observe.log") -> dict:
+    env = load_env()
+    key = env["OCTOPUS_API_KEY"]
+    account = env["OCTOPUS_ACCOUNT_NUMBER"]
+    schedule = config.rate_schedule()
+
+    start, end = _local_bounds(start_date, end_date)
+
+    points = cached_meter_points(key, account)
+    if "import" not in points:
+        raise CostError("no live import agreement found on this account")
+
+    imported, exported, rates = _fetch_range(points, key, start, end)
+    windows = read_windows(log_path)
 
     out = summarise(imported, exported, rates, windows, schedule)
     # The rates at the END of the range: what "off_peak_p" means to anything
@@ -355,6 +408,122 @@ def report(start_date, end_date, log_path="observe.log") -> dict:
                 # look like a missing row, not a quietly wrong total.
                 "rate_periods": [[str(d), o, pk] for d, o, pk in schedule],
                 "dispatch_windows": len(windows)})
+    return out
+
+
+# --------------------------------------------------------------------------
+# per-day results, so a finished day need never be costed twice
+# --------------------------------------------------------------------------
+
+def expected_half_hours(day) -> int:
+    """Half hours in one LOCAL day: 48, or 46 / 50 at a clock change.
+
+    Worked out from the clock, not assumed. The clocks go back on 25 Oct, a
+    day with 50; a fixed threshold of 48 would call it settled with four half
+    hours still to arrive and freeze it that way.
+    """
+    start = dt.datetime.combine(day, dt.time(0, 0)).astimezone()
+    end = dt.datetime.combine(day + dt.timedelta(days=1),
+                              dt.time(0, 0)).astimezone()
+    return int(round((end - start).total_seconds() / 1800))
+
+
+def fingerprint() -> str:
+    """What a stored day was priced WITH: the rates AND the pricing code.
+
+    A day costed under an old rate schedule is wrong the moment IOG_RATE_CHANGES
+    is edited, and one costed by old logic is wrong the moment dispatch_windows
+    is fixed. Hashing this file means a fix reaches stored days; the price of a
+    needless invalidation is one recompute.
+    """
+    h = hashlib.sha1()
+    h.update(repr(config.rate_schedule()).encode())
+    try:
+        with open(__file__, "rb") as handle:
+            h.update(handle.read())
+    except OSError:
+        h.update(b"unreadable")
+    return h.hexdigest()[:16]
+
+
+def day_summaries(imported, exported, rates, windows, schedule,
+                  start_date, end_date, has_export=True) -> dict:
+    """summarise() once per local day, plus whether each day is SETTLED.
+
+    SETTLED means safe to keep for ever: import and export both have every
+    half hour that day has, nothing is unpriced, and the log gave us dispatch
+    windows at all. That last one is the tell recorded elsewhere -- "dispatch
+    windows 0" means every half hour priced at PEAK, and keeping that would
+    make the wrong number permanent.
+    """
+    def by_day(series):
+        out = {}
+        for when, value in series.items():
+            out.setdefault(when.astimezone().date(), {})[when] = value
+        return out
+    imp, exp, rt = by_day(imported), by_day(exported), by_day(rates)
+
+    out = {}
+    day = start_date
+    while day <= end_date:
+        row = summarise(imp.get(day, {}), exp.get(day, {}), rt.get(day, {}),
+                        windows, schedule)
+        need = expected_half_hours(day)
+        row["expected"] = need
+        row["settled"] = bool(
+            windows
+            and row["import_half_hours"] >= need
+            and (not has_export
+                 or (row["export_half_hours"] >= need
+                     and not row["export_unpriced_kwh"])))
+        out[day] = row
+        day += dt.timedelta(days=1)
+    return out
+
+
+def report_by_day(start_date, end_date, log_path="observe.log") -> dict:
+    """{local date: summary} for a range, from ONE fetch of the meter data."""
+    env = load_env()
+    key = env["OCTOPUS_API_KEY"]
+    account = env["OCTOPUS_ACCOUNT_NUMBER"]
+    schedule = config.rate_schedule()
+    start, end = _local_bounds(start_date, end_date)
+    points = cached_meter_points(key, account)
+    if "import" not in points:
+        raise CostError("no live import agreement found on this account")
+    imported, exported, rates = _fetch_range(points, key, start, end)
+    return day_summaries(imported, exported, rates, read_windows(log_path),
+                         schedule, start_date, end_date,
+                         has_export="export" in points)
+
+
+_ADDITIVE = ("import_kwh", "cheap_kwh", "peak_kwh", "import_cost",
+             "export_kwh", "export_unpriced_kwh", "export_income", "net",
+             "import_half_hours", "export_half_hours")
+
+
+def combine(rows, start_date, end_date, schedule=None) -> dict:
+    """Days back into one range, identical to what report() returns for it.
+
+    Three fields are NOT sums, which is where a naive roll-up goes wrong:
+    half_hours is the max of the two TOTALS (summing each day's max gives a
+    different number), and vs_all_peak and the two rates are derived from the
+    schedule at the END of the range, not stored per day.
+    """
+    schedule = schedule or config.rate_schedule()
+    out = {k: 0.0 for k in _ADDITIVE}
+    for row in rows:
+        for k in _ADDITIVE:
+            out[k] += row.get(k) or 0
+    out["import_half_hours"] = int(out["import_half_hours"])
+    out["export_half_hours"] = int(out["export_half_hours"])
+    out["half_hours"] = max(out["import_half_hours"], out["export_half_hours"])
+    out["vs_all_peak"] = (out["cheap_kwh"]
+                          * (schedule[-1][2] - schedule[-1][1]) / 100.0)
+    end_off, end_peak = config.rates_at(schedule, end_date)
+    out.update({"start": start_date, "end": end_date,
+                "off_peak_p": end_off, "peak_p": end_peak,
+                "rate_periods": [[str(d), o, pk] for d, o, pk in schedule]})
     return out
 
 

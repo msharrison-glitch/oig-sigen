@@ -2034,12 +2034,116 @@ def period_range(name: str, today=None) -> tuple:
     return today, today, label, kind
 
 
-def report_sigen(start, end, kind) -> dict:
-    """Energy totals for the period. One call for a day or a month."""
-    try:
-        client = shared_sigen_client()
+# --------------------------------------------------------------------------
+# finished days are kept, not recomputed
+# --------------------------------------------------------------------------
 
+DAY_STORE_FILE = ".day-totals.json"
+
+
+class DayStore:
+    """Totals for days that cannot change any more, in one small JSON file.
+
+    Every report page used to re-ask Sigen, myenergi and Octopus for days
+    that finished weeks ago and will never read differently. Each record is
+    keyed by source and day; costs also carry a fingerprint of what priced
+    them, so editing the rates or fixing the pricing code recomputes them
+    rather than serving the old answer.
+
+    It is an OPTIMISATION: every failure here (unreadable file, full disk)
+    degrades to "recompute", never to an error on the page. And only a
+    result that is known to be final is ever put in -- never an error, never
+    a partial day.
+    """
+
+    def __init__(self, path=None):
+        self._path = path
+        self._lock = threading.Lock()
+        self._data = None
+
+    def _file(self) -> str:
+        return self._path or str(state_path(DAY_STORE_FILE))
+
+    def _ensure(self) -> dict:
+        if self._data is None:
+            try:
+                with io.open(self._file(), encoding="utf-8") as handle:
+                    data = json.load(handle)
+                self._data = data if isinstance(data, dict) else {}
+            except (OSError, ValueError):
+                self._data = {}
+        return self._data
+
+    def get(self, kind, key, fp=None):
+        with self._lock:
+            rec = (self._ensure().get(kind) or {}).get(key)
+        if not isinstance(rec, dict) or "v" not in rec:
+            return None
+        if fp is not None and rec.get("fp") != fp:
+            return None
+        return rec["v"]
+
+    def put_many(self, kind, items, fp=None) -> None:
+        if not items:
+            return
+        with self._lock:
+            bucket = self._ensure().setdefault(kind, {})
+            for key, value in items.items():
+                rec = {"v": value}
+                if fp is not None:
+                    rec["fp"] = fp
+                bucket[key] = rec
+            path = self._file()
+            tmp = path + ".tmp"
+            try:
+                # Write beside it and rename, so a crash mid-write leaves the
+                # old file intact instead of a half-written one.
+                with io.open(tmp, "w", encoding="utf-8") as handle:
+                    json.dump(self._data, handle)
+                os.replace(tmp, path)
+            except OSError:
+                pass
+
+
+DAY_STORE = DayStore()
+
+# Sigen's cloud can backfill a day after the plant was offline, so a day is
+# trusted only once it is two days old. The Zappi is read straight from the
+# charger and has no such lag.
+SIGEN_FINAL_DAYS = 2
+ZAPPI_FINAL_DAYS = 1
+ZAPPI_FULL_DAY_ROWS = 1300       # per-minute rows; a real day has ~1440
+# A day with a gap (the charger was offline for hours: 1173 rows on 6 Sep,
+# 9.4 kWh of it real) is still history, once it is old enough that the gap
+# is not simply the API being slow. Never kept while it is recent.
+ZAPPI_PARTIAL_DAYS = 7
+
+
+def _days_between(start, end):
+    out, day = [], start
+    while day <= end:
+        out.append(day)
+        day += timedelta(days=1)
+    return out
+
+
+def report_sigen(start, end, kind, store=None, today=None) -> dict:
+    """Energy totals for the period. One call for a day or a month.
+
+    Finished days (and finished months) come from the day store; only what
+    is missing is asked of the cloud, and a good answer is kept.
+    """
+    store = store or DAY_STORE
+    today = today or datetime.now().date()
+    final = lambda d: d <= today - timedelta(days=SIGEN_FINAL_DAYS)
+
+    def usable(card) -> bool:
+        return bool(card) and any(isinstance(v, (int, float))
+                                  for v in card.values())
+
+    try:
         def fetch(s, e, flag):
+            client = shared_sigen_client()
             data = client._call(
                 "GET",
                 f"data-process/sigen/station/statistics/v1/energy/custom"
@@ -2050,25 +2154,59 @@ def report_sigen(start, end, kind) -> dict:
                     for c in (data.get("stationCards") or [])}
 
         if kind == "month":
-            return fetch(start, end, 2)
+            # A COMPLETE month, kept under its own key: summing thirty days
+            # would be thirty calls, and dateFlag=2 is one.
+            done = (start.day == 1 and (end + timedelta(days=1)).day == 1
+                    and final(end))
+            key = f"M:{start:%Y-%m}"
+            if done:
+                hit = store.get("sigen", key)
+                if hit is not None:
+                    return hit
+            card = fetch(start, end, 2)
+            if done and usable(card):
+                store.put_many("sigen", {key: card})
+            return card
         if kind == "day":
-            return fetch(start, end, 1)
+            key = start.isoformat()
+            if final(start):
+                hit = store.get("sigen", key)
+                if hit is not None:
+                    return hit
+            card = fetch(start, end, 1)
+            if final(start) and usable(card):
+                store.put_many("sigen", {key: card})
+            return card
         # A span of days: the API returns zeros for a ranged dateFlag=1, so
-        # sum the days. Seven calls, cached; still far cheaper than walking a
-        # month when dateFlag=2 exists.
+        # sum the days -- but only fetch the ones not already kept.
+        cards = {}
+        missing = []
+        for day in _days_between(start, end):
+            hit = store.get("sigen", day.isoformat()) if final(day) else None
+            if hit is not None:
+                cards[day] = hit
+            else:
+                missing.append(day)
+        if missing:
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                got = list(pool.map(lambda d: fetch(d, d, 1), missing))
+            keep = {}
+            for day, card in zip(missing, got):
+                cards[day] = card
+                if final(day) and usable(card):
+                    keep[day.isoformat()] = card
+            store.put_many("sigen", keep)
         total = {}
-        day = start
-        while day <= end:
-            for key, value in fetch(day, day, 1).items():
+        for day in _days_between(start, end):
+            for key, value in cards[day].items():
                 if isinstance(value, (int, float)):
                     total[key] = total.get(key, 0.0) + value
-            day += timedelta(days=1)
         return total
     except Exception as exc:                          # noqa: BLE001
         return {"error": f"{type(exc).__name__}"}
 
 
-def report_zappi(start, end) -> dict:
+def report_zappi(start, end, store=None, today=None, client=None) -> dict:
     """Car charging for the period, in kWh.
 
     myenergi reports JOULES PER MINUTE in h1b/h1d/h2b/... where the suffix is
@@ -2077,14 +2215,19 @@ def report_zappi(start, end) -> dict:
     prefix silently counted the hour as energy.
     """
     try:
-        import zappi as zappi_mod
-        client = zappi_mod.client_from_env()
-
-        days = []
-        day = start
-        while day <= end:
-            days.append(day)
-            day += timedelta(days=1)
+        store = store or DAY_STORE
+        today = today or datetime.now().date()
+        days = _days_between(start, end)
+        kept = {}
+        for d in days:
+            if d <= today - timedelta(days=ZAPPI_FINAL_DAYS):
+                hit = store.get("zappi", d.isoformat())
+                if hit is not None:
+                    kept[d] = (hit["grid"], hit["solar"], True)
+        todo = [d for d in days if d not in kept]
+        if todo and client is None:
+            import zappi as zappi_mod
+            client = zappi_mod.client_from_env()
 
         def one(d):
             """One day's joules. Never raises: a month must not fail on a
@@ -2095,7 +2238,7 @@ def report_zappi(start, end) -> dict:
                                   f"{d.year}-{d.month}-{d.day}")
                 rows = raw[next(iter(raw))] if raw else []
             except Exception:                          # noqa: BLE001
-                return 0.0, 0.0, False
+                return 0.0, 0.0, False, 0
             grid = solar = 0.0
             for row in rows:
                 for key, value in row.items():
@@ -2106,35 +2249,82 @@ def report_zappi(start, end) -> dict:
                             grid += value
                         elif key[2] == "d":
                             solar += value
-            return grid, solar, True
+            # A real day, even a quiet one, is ~1440 per-minute rows of zeros
+            # (measured). An empty or short answer is the API hiccuping, and
+            # keeping THAT would turn a glitch into a permanent zero.
+            return grid, solar, True, len(rows)
 
         # A day at a time is how this API works, so a month is 30 round
         # trips. Sequentially that took long enough to time the page out;
         # concurrently it is one round trip's worth of waiting.
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            results = list(pool.map(one, days))
+        results = dict(kept)
+        if todo:
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                fetched = list(pool.map(one, todo))
+            keep = {}
+            for d, (g, sl, ok, nrows) in zip(todo, fetched):
+                results[d] = (g, sl, ok)
+                full = (nrows >= ZAPPI_FULL_DAY_ROWS
+                        or (nrows > 0 and d <= today - timedelta(
+                            days=ZAPPI_PARTIAL_DAYS)))
+                if (ok and full
+                        and d <= today - timedelta(days=ZAPPI_FINAL_DAYS)):
+                    keep[d.isoformat()] = {"grid": g, "solar": sl}
+            store.put_many("zappi", keep)
 
-        grid = sum(r[0] for r in results)
-        solar = sum(r[1] for r in results)
+        grid = sum(results[d][0] for d in days)
+        solar = sum(results[d][1] for d in days)
         return {"grid": grid / 3600000.0, "solar": solar / 3600000.0,
                 "total": (grid + solar) / 3600000.0,
-                "days": sum(1 for r in results if r[2]),
+                "days": sum(1 for d in days if results[d][2]),
                 "days_asked": len(days)}
     except Exception as exc:                          # noqa: BLE001
         return {"error": f"{type(exc).__name__}"}
 
 
-def report_costs(start, end, log_path) -> dict:
+def report_costs(start, end, log_path, store=None, today=None,
+                 fetch=None) -> dict:
     """Money, from costs.py. Never raises.
 
     Meter readings lag roughly 22 hours, so "today" will be empty or partial
     and that is the meter's doing. Reported as a count of half-hours so the
     page can say how complete it is rather than presenting a third of a day
     as if it were the whole thing.
+
+    A day is KEPT only once it is settled -- every half hour published for
+    both import and export, all priced, dispatch windows read -- and only
+    ever as a whole-day result, so a range is the sum of its days. Anything
+    not yet settled is asked for again each time, because it will change.
     """
     try:
         import costs
-        return costs.report(start, end, log_path)
+        store = store or DAY_STORE
+        today = today or datetime.now().date()
+        fetch = fetch or costs.report_by_day
+        fp = costs.fingerprint()
+        schedule = costs.config.rate_schedule()
+
+        days = _days_between(start, end)
+        rows = {}
+        for d in days:
+            if d < today:
+                hit = store.get("costs", d.isoformat(), fp)
+                if hit is not None:
+                    rows[d] = hit
+        missing = [d for d in days if d not in rows]
+        if missing:
+            fresh = fetch(min(missing), max(missing), log_path)
+            keep = {}
+            for d in missing:
+                row = fresh.get(d)
+                if row is None:
+                    continue
+                rows[d] = row
+                if d < today and row.get("settled"):
+                    keep[d.isoformat()] = row
+            store.put_many("costs", keep, fp)
+        return costs.combine([rows[d] for d in days if d in rows],
+                             start, end, schedule)
     except Exception as exc:                          # noqa: BLE001
         return {"error": f"{type(exc).__name__}: {exc}"[:120]}
 

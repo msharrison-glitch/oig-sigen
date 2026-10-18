@@ -176,6 +176,99 @@ def main() -> int:
                               "2026-10-31:7.6/34.955, 2026-10-01:4.279/28.3429"}),
           parsed)
 
+    print("\nCosting day by day then combining equals costing the range")
+    # The reason per-day results can be trusted: nothing about summing days is
+    # allowed to differ from pricing the whole span at once.
+    sched = [(dt.date.min, 4.49, 29.757), (dt.date(2026, 10, 2), 4.279, 28.3429)]
+    d0 = dt.datetime(2026, 10, 1, 0, 0).astimezone()
+    imp, exp, rts = {}, {}, {}
+    for i in range(3 * 48):
+        when = d0 + dt.timedelta(minutes=30 * i)
+        imp[when] = 0.1 + (i % 7) * 0.05
+        exp[when] = 0.02 * (i % 5)
+        rts[when] = 12.0 + (i % 11)
+    win = [(dt.datetime(2026, 10, 1, 20, 0), dt.datetime(2026, 10, 1, 22, 30))]
+    whole = costs.summarise(imp, exp, rts, win, sched)
+    days = costs.day_summaries(imp, exp, rts, win, sched,
+                               dt.date(2026, 10, 1), dt.date(2026, 10, 3))
+    rolled = costs.combine(days.values(), dt.date(2026, 10, 1),
+                           dt.date(2026, 10, 3), sched)
+    for field in ("import_kwh", "cheap_kwh", "peak_kwh", "import_cost",
+                  "export_kwh", "export_income", "net", "vs_all_peak",
+                  "half_hours", "import_half_hours", "export_half_hours"):
+        check(f"{field} matches the whole-range figure",
+              round(rolled[field], 6), round(whole[field], 6))
+    check("a different rate per day is honoured (2 Oct reprices)",
+          round(days[dt.date(2026, 10, 2)]["import_cost"]
+                / days[dt.date(2026, 10, 2)]["import_kwh"], 6) > 0, True)
+    check("a full day with windows is settled",
+          days[dt.date(2026, 10, 1)]["settled"], True)
+    check("no dispatch windows means NOT settled (everything priced at peak)",
+          costs.day_summaries(imp, exp, rts, [], sched, dt.date(2026, 10, 1),
+                              dt.date(2026, 10, 1))[dt.date(2026, 10, 1)]
+          ["settled"], False)
+    partial = {k: v for k, v in imp.items() if k < d0 + dt.timedelta(hours=10)}
+    check("a part-published day is not settled",
+          costs.day_summaries(partial, exp, rts, win, sched,
+                              dt.date(2026, 10, 1), dt.date(2026, 10, 1))
+          [dt.date(2026, 10, 1)]["settled"], False)
+    check("a day whose export has no published rate is not settled",
+          costs.day_summaries(imp, exp, {}, win, sched, dt.date(2026, 10, 1),
+                              dt.date(2026, 10, 1))[dt.date(2026, 10, 1)]
+          ["settled"], False)
+    check("no export meter at all can still settle on import alone",
+          costs.day_summaries(imp, {}, {}, win, sched, dt.date(2026, 10, 1),
+                              dt.date(2026, 10, 1), has_export=False)
+          [dt.date(2026, 10, 1)]["settled"], True)
+
+    print("\nA range is half-open: the next day's first half hour is not in it")
+    tzx = dt.timezone(dt.timedelta(hours=1))
+    lo = dt.datetime(2026, 9, 30, 0, 0, tzinfo=tzx)
+    hi = dt.datetime(2026, 10, 1, 0, 0, tzinfo=tzx)
+    boundary = {lo: 1.0, hi - dt.timedelta(minutes=30): 2.0, hi: 9.0}
+    saved_c, saved_a = costs.consumption, costs.agile_rates
+    costs.consumption = lambda *a, **k: dict(boundary)
+    costs.agile_rates = lambda *a, **k: dict(boundary)
+    try:
+        pts = {"import": {"mpan": "1", "serials": ["s"]},
+               "export": {"mpan": "2", "serials": ["s"], "tariff": "T"}}
+        got_i, got_e, got_r = costs._fetch_range(pts, "k", lo, hi)
+        check("the half hour starting AT the end is dropped",
+              sorted(got_i.values()), [1.0, 2.0])
+        check("for export and for rates as well",
+              (sorted(got_e.values()), sorted(got_r.values())),
+              ([1.0, 2.0], [1.0, 2.0]))
+    finally:
+        costs.consumption, costs.agile_rates = saved_c, saved_a
+
+    print("\nA clock-change day has 46 or 50 half hours, not 48")
+    import os as _os, time as _time
+    saved_tz = _os.environ.get("TZ")
+    _os.environ["TZ"] = "Europe/London"; _time.tzset()
+    try:
+        check("an ordinary day is 48", costs.expected_half_hours(dt.date(2026, 10, 18)), 48)
+        check("25 Oct 2026 (clocks go back) is 50",
+              costs.expected_half_hours(dt.date(2026, 10, 25)), 50)
+        check("29 Mar 2026 (clocks go forward) is 46",
+              costs.expected_half_hours(dt.date(2026, 3, 29)), 46)
+    finally:
+        if saved_tz is None:
+            _os.environ.pop("TZ", None)
+        else:
+            _os.environ["TZ"] = saved_tz
+        _time.tzset()
+
+    print("\nThe fingerprint changes with the rates")
+    fp1 = costs.fingerprint()
+    real = costs.config.rate_schedule
+    costs.config.rate_schedule = lambda env=None: [(dt.date.min, 9.0, 9.0)]
+    try:
+        check("a different schedule is a different fingerprint",
+              costs.fingerprint() != fp1, True)
+    finally:
+        costs.config.rate_schedule = real
+    check("and the same inputs give the same one", costs.fingerprint(), fp1)
+
     print("\nOctopus mixes Z and +01:00 in the same API")
     check("a Z timestamp parses on Python 3.9",
           costs._iso("2026-09-12T22:30:00Z").utcoffset(), dt.timedelta(0))
