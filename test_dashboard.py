@@ -370,55 +370,47 @@ def main() -> int:
           "Costs unavailable" in dashboard.money_block({"error": "CostError"}, 48),
           True)
 
-    print("\nImport and export prices sit together, with the spread")
+    print("\nThe export card's spread is against the OVERNIGHT rate")
+    # Reported 2026-10-18: the spread was measured against the CURRENT buy
+    # price, so every afternoon read "-12.82p" (buy at 29.76, sell at 16.94)
+    # for a decision nobody makes. The battery is filled overnight at the
+    # off-peak rate, and that is what a kWh sold now actually cost.
     _n = dt.datetime.now().replace(second=0, microsecond=0)
     _ago = lambda m: (_n - dt.timedelta(minutes=m)).strftime("%Y%m%d %H:%M")
-    both = {"BUY_TARIFF": [(_ago(60), 0.29757), (_ago(5), 0.29757)],
-            "SELL_TARIFF": [(_ago(60), 0.1694), (_ago(5), 0.1694)]}
-    cards = dashboard.hero({"sigen": {"soc": 50.0}, "tariff_soc": both})
-    # The import rate has no card of its own -- it is peak most of the day
-    # and says nothing then. It still drives the SPREAD, which is the number
-    # that decides anything, so it must not disappear from the arithmetic.
-    check("the import rate gets no headline card",
+    sell_now = {"SELL_TARIFF": [(_ago(60), 0.1694), (_ago(5), 0.1694)]}
+    peak_buy = dict(sell_now, BUY_TARIFF=[(_ago(5), 0.29757)])
+    cards = dashboard.hero({"sigen": {"soc": 50.0}, "tariff_soc": peak_buy,
+                            "off_peak_p": 4.279})
+    check("the import rate still gets no headline card",
           "import now" in cards, False)
     check("the export price is shown", "16.94p" in cards, True)
-    # Buying at 29.76 to sell at 16.94 loses money; the sign must say so.
-    check("and the spread is signed, showing the loss",
-          "-12.82p" in cards, True)
-
-    cheap = {"BUY_TARIFF": [(_ago(5), 0.0449)],
-             "SELL_TARIFF": [(_ago(5), 0.1694)]}
-    check("a cheap import shows a positive spread",
-          "+12.45p" in dashboard.hero({"sigen": {}, "tariff_soc": cheap}), True)
-    check("export alone still renders when there is no import series",
-          "16.94p" in dashboard.hero(
-              {"sigen": {}, "tariff_soc": {"SELL_TARIFF": [(_ago(5), 0.1694)]}}),
+    check("the spread is against off-peak: 16.94 - 4.279",
+          "+12.66p" in cards, True)
+    check("it says which rate it used", "vs 4.28p night" in cards, True)
+    check("and ignores the current peak buy price entirely",
+          "-12.82p" in cards, False)
+    check("the same with no buy series at all",
+          "+12.66p" in dashboard.hero({"sigen": {}, "tariff_soc": sell_now,
+                                       "off_peak_p": 4.279}), True)
+    check("an unset off-peak rate falls back to the default, not a crash",
+          "+12.45p" in dashboard.hero({"sigen": {}, "tariff_soc": sell_now}),
+          True)
+    check("the spread follows a tariff change (7.6p from 31 Oct)",
+          "+9.34p" in dashboard.hero({"sigen": {}, "tariff_soc": sell_now,
+                                      "off_peak_p": 7.6}), True)
+    # A bonus slot is also bought at the off-peak rate, so it cannot change
+    # the figure; the old bonus-slot correction existed only to repair a
+    # spread that was measured against the wrong price.
+    for bonus in ("charging", "unconfirmed", None):
+        check(f"bonus state {bonus!r} does not move the spread",
+              "+12.45p" in dashboard.hero(
+                  {"sigen": {}, "tariff_soc": peak_buy,
+                   "agent": {"bonus": bonus}}), True)
+    check("export alone still renders",
+          "16.94p" in dashboard.hero({"sigen": {}, "tariff_soc": sell_now}),
           True)
     check("and no tariff data at all is not a crash",
           dashboard.hero({"sigen": {}, "tariff_soc": {}}), "")
-
-    print("\nA bonus slot is priced at off-peak, not at Sigen's peak")
-    # Sigen's BUY_TARIFF knows only the static schedule, so on 2026-09-15 the
-    # card read 29.76p while the agent charged a confirmed dispatch at 4.49p,
-    # under a banner on the same page saying the import was off-peak.
-    peak = {"BUY_TARIFF": [(_ago(5), 0.29757)],
-            "SELL_TARIFF": [(_ago(5), 0.1694)]}
-
-    def card(bonus):
-        return dashboard.hero({"sigen": {}, "tariff_soc": peak,
-                               "agent": {"bonus": bonus}, "off_peak_p": 4.49})
-    # With no import card, the bonus correction shows up in the SPREAD: a
-    # slot charging at 4.49p against 16.94p export is +12.45p, where Sigen's
-    # own 29.76p would have said -12.82p and called the night a loss.
-    check("charging a slot prices the spread at the off-peak rate",
-          "+12.45p" in card("charging"), True)
-    check("a confirmed slot at target too",
-          "+12.45p" in card("confirmed"), True)
-    # Planned but the car never drew: that bills at PEAK. Pricing it at
-    # 4.49p would be the exact mistake the agent is built to avoid.
-    check("an unconfirmed slot stays at the peak rate",
-          "-12.82p" in card("unconfirmed"), True)
-    check("and so does no slot at all", "-12.82p" in card(None), True)
 
     print("\nThe headline cards must not contradict the rows below them")
     # Seen on the phone, 2026-09-20 13:35: "0.0 kW import / importing" with
@@ -437,14 +429,13 @@ def main() -> int:
     # otherwise. Agile Outgoing really does fall to 0.02p on a sunny Sunday.
     _n2 = dt.datetime.now().replace(second=0, microsecond=0)
     _a = lambda m: (_n2 - dt.timedelta(minutes=m)).strftime("%Y%m%d %H:%M")
-    bad_spread = {"BUY_TARIFF": [(_a(5), 0.29757)],
-                  "SELL_TARIFF": [(_a(5), 0.0026)]}
-    card = dashboard.hero({"sigen": {}, "tariff_soc": bad_spread})
-    check("the losing spread is shown", "-29.50p" in card, True)
+    bad_spread = {"SELL_TARIFF": [(_a(5), 0.0026)]}
+    card = dashboard.hero({"sigen": {}, "tariff_soc": bad_spread,
+                           "off_peak_p": 4.49})
+    check("the losing spread is shown", "-4.23p" in card, True)
     check("and coloured as a loss, not as cheap",
           'c-peak"><div class="big">0.26p' in card, True)
-    good_spread = {"BUY_TARIFF": [(_a(5), 0.0449)],
-                   "SELL_TARIFF": [(_a(5), 0.1694)]}
+    good_spread = {"SELL_TARIFF": [(_a(5), 0.1694)]}
     check("a profitable spread stays green",
           'c-cheap"><div class="big">16.94p' in dashboard.hero(
               {"sigen": {}, "tariff_soc": good_spread}), True)

@@ -1467,59 +1467,41 @@ def agent_block(agent: dict) -> str:
 def hero(snap: dict) -> str:
     """The things worth seeing from across the room.
 
-    Import and export price sit together deliberately: the SPREAD between
-    them is the decision. Buying at 4.49p to sell at 16.94p is worth doing
-    and buying at 29.76p to sell at 16.94p is not, and neither number answers
-    that on its own.
+    The export card carries the SPREAD against the overnight import rate:
+    energy bought at 4.49p and sold at 16.94p is worth doing, and the same
+    export when the battery was filled at 29.76p would not be -- the export
+    price alone answers neither.
     """
     sigen = snap["sigen"]
     tariff = snap.get("tariff_soc") or {}
     cards = []
 
-    buy = (tariff.get("BUY_TARIFF") or [])
-    if buy and not tariff.get("error"):
-        current = value_now(buy)
-        price = (current if current is not None else buy[0][1]) * 100
-        cheap = price < 10
-        sub = "off-peak" if cheap else "peak rate"
-        # Sigen prices a bonus slot at peak, because it only knows the static
-        # schedule. The agent's verdict overrides it -- but only upward in
-        # confidence: an unconfirmed slot stays at peak, because that is what
-        # it bills at if the car never draws.
-        bonus = (snap.get("agent") or {}).get("bonus")
-        if not cheap and bonus in ("charging", "confirmed"):
-            import costs
-            price = snap.get("off_peak_p") or costs.DEFAULT_OFF_PEAK_P
-            cheap, sub = True, "off-peak · bonus slot"
-        elif not cheap and bonus == "unconfirmed":
-            sub = "bonus slot planned, unconfirmed"
-        # The import rate gets NO card of its own, by choice: it is peak for
-        # most of the day and says nothing then. It still has to be computed,
-        # because the export card's SPREAD is measured against it, and that
-        # spread is what actually decides whether to buy -- including the
-        # bonus-slot correction above, without which the spread would be
-        # measured against Sigen's 29.76p while the agent charged at 4.49p.
-        # The import price remains on the Today chart and in the money
-        # figures on the report pages.
-
+    # The spread is export-now minus what the energy in the battery COST,
+    # which is the OVERNIGHT rate -- that is when this plant is filled, and
+    # a kWh sold at 6pm was bought at 4.28p at 2am whatever the import price
+    # happens to be right now. It used to be measured against the CURRENT
+    # buy price, so every afternoon read a large negative number ("buy at
+    # 28p, sell at 17p") for a decision nobody was making. Sigen's own
+    # BUY_TARIFF is no longer consulted here, which also retires the
+    # bonus-slot correction that existed only to repair it: a bonus slot is
+    # bought at the off-peak rate too.
+    #
+    # off_peak_p is the rate in force TODAY (config.rates_at), so the figure
+    # steps on a tariff change rather than being rewritten into history.
     sell = (tariff.get("SELL_TARIFF") or [])
     if sell and not tariff.get("error"):
+        import costs
+        night_p = snap.get("off_peak_p") or costs.DEFAULT_OFF_PEAK_P
         current = value_now(sell)
         out_p = (current if current is not None else sell[0][1]) * 100
-        # The spread, when both are known: what a kWh through the battery is
-        # worth right now, before round-trip losses.
-        sub = "export rate"
-        tone = "cheap"
-        if buy and not tariff.get("error"):
-            spread = out_p - price
-            sub = (f"spread {spread:+.2f}p" if abs(spread) >= 0.005
-                   else "spread flat")
-            # Colour by the SIGN, not by the card. A spread of -29.50p --
-            # buy now, sell now, lose 29.5p -- was rendered in the same green
-            # as a profitable one, so the arithmetic said one thing and the
-            # colour said the opposite.
-            if spread < -0.005:
-                tone = "peak"
+        # What a kWh through the battery is worth right now, before
+        # round-trip losses (roughly 19% AC to AC on this plant).
+        spread = out_p - night_p
+        sub = (f"spread {spread:+.2f}p vs {night_p:.2f}p night"
+               if abs(spread) >= 0.005 else f"spread flat vs {night_p:.2f}p night")
+        # Colour by the SIGN, not by the card: selling below what the energy
+        # cost is a loss, and green would say the opposite.
+        tone = "peak" if spread < -0.005 else "cheap"
         cards.append((f"{out_p:.2f}p", "export now", tone, sub))
 
     soc = sigen.get("soc")
