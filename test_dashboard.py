@@ -1102,6 +1102,29 @@ def main() -> int:
     check("a computed-but-empty agent is known",
           dashboard._windows_known({"bonus_windows": []}), True)
 
+    print("\nA dead Shelly is remembered, so it cannot slow every page load")
+    calls = []
+    real = dashboard.urllib.request.urlopen
+    def dead(*args, **kw):
+        calls.append(1)
+        raise TimeoutError("no answer")
+    dashboard.urllib.request.urlopen = dead
+    try:
+        dashboard._shelly_down.clear()
+        first = dashboard.read_shelly("10.9.9.9", now=1000.0)
+        probes = len(calls)
+        again = dashboard.read_shelly("10.9.9.9", now=1030.0)
+        check("first failure probes the device", probes > 0, True)
+        check("and reports the error", first.get("error"), "TimeoutError")
+        check("within the TTL it is NOT probed again", len(calls), probes)
+        check("but the error is still reported", again.get("error"),
+              "TimeoutError")
+        dashboard.read_shelly("10.9.9.9", now=1000.0 + dashboard.SHELLY_DOWN_TTL + 1)
+        check("after the TTL it is tried again", len(calls) > probes, True)
+    finally:
+        dashboard.urllib.request.urlopen = real
+        dashboard._shelly_down.clear()
+
     print("\nPlug history is DIFFERENCED, because a plug only counts upwards")
     # A Shelly plug exposes a lifetime kWh counter and nothing else -- no
     # yesterday, no last week. Per-period consumption can only come from the

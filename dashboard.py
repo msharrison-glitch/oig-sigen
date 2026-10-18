@@ -242,9 +242,21 @@ def read_heatpump(path=None) -> dict:
     return out
 
 
-def read_shelly(host: str) -> dict:
+# A Shelly that does not answer costs the full timeout on EVERY page load,
+# and the page waits for the slowest source -- one dead plug made the whole
+# dashboard take 6 s. Remember a failure briefly and skip the host meanwhile.
+SHELLY_DOWN_TTL = 60.0
+_shelly_down: dict = {}          # host -> (monotonic time, error name)
+
+
+def read_shelly(host: str, now=None) -> dict:
     """One Shelly, whatever generation. Never raises."""
     out = {"host": host, "name": None, "gen": None, "channels": []}
+    clock = time.monotonic() if now is None else now
+    failed = _shelly_down.get(host)
+    if failed and clock - failed[0] < SHELLY_DOWN_TTL:
+        out["error"] = failed[1]
+        return out
 
     def get(path):
         url = f"http://{host}{path}"
@@ -265,7 +277,9 @@ def read_shelly(host: str) -> dict:
         info = get("/shelly")
     except Exception as exc:                      # noqa: BLE001
         out["error"] = f"{type(exc).__name__}"
+        _shelly_down[host] = (clock, out["error"])
         return out
+    _shelly_down.pop(host, None)
 
     out["gen"] = info.get("gen", 1)
     out["model"] = info.get("model") or info.get("type")
