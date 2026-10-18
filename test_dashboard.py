@@ -1213,6 +1213,40 @@ def main() -> int:
     print("\nA missing history file is empty, not an error")
     check("no file yet", dashboard.load_shelly_history("/nonexistent/x.jsonl"), [])
 
+    print("\nThe history file is parsed once, then only its new tail")
+    import os as _os, tempfile
+    def line(minute, kwh):
+        return json.dumps({"at": f"2026-10-18T12:{minute:02d}:00",
+                           "channel": "switch:0", "host": "h", "kwh": kwh}) + "\n"
+    with tempfile.TemporaryDirectory() as tmp:
+        hp = _os.path.join(tmp, "h.jsonl")
+        open(hp, "w").write(line(0, 1.0) + line(1, 2.0))
+        check("first read gets both rows",
+              len(dashboard.load_shelly_history(hp)), 2)
+        open(hp, "a").write(line(2, 3.0))
+        got = dashboard.load_shelly_history(hp)
+        check("an appended row is picked up", [r["kwh"] for r in got],
+              [1.0, 2.0, 3.0])
+        open(hp, "a").write(line(3, 4.0)[:20])          # torn, mid-write
+        check("a half-written last line is ignored, not mis-parsed",
+              len(dashboard.load_shelly_history(hp)), 3)
+        open(hp, "a").write(line(3, 4.0)[20:])          # the recorder finishes
+        check("and is read once it is complete",
+              len(dashboard.load_shelly_history(hp)), 4)
+        got.append("mutated")
+        check("callers cannot corrupt the cache",
+              len(dashboard.load_shelly_history(hp)), 4)
+        open(hp, "w").write(line(5, 9.0))                # replaced, smaller
+        check("a truncated file is re-read from scratch",
+              [r["kwh"] for r in dashboard.load_shelly_history(hp)], [9.0])
+        open(hp, "w").write(line(6, 7.0) + line(7, 8.0) + line(8, 9.5))
+        check("a replaced, LARGER file is not served from the old cache",
+              [r["kwh"] for r in dashboard.load_shelly_history(hp)],
+              [7.0, 8.0, 9.5])
+        _os.remove(hp)
+        check("a deleted file is empty again",
+              dashboard.load_shelly_history(hp), [])
+
     print("\nFormatting helpers")
     check("None power is a dash, not 0", dashboard.kw(None), "&mdash;")
     check("None watts is a dash", dashboard.watts(None), "&mdash;")

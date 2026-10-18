@@ -886,24 +886,56 @@ def record_shellys(shelly_hosts, path=None) -> tuple:
     return path, written, len(devices)
 
 
+# The history file only ever grows (record_shellys appends), and it reached
+# 70,000 rows / 8 MB -- which took ~11 s to parse on the NAS, on every cold
+# report page. So it is read ONCE and then only its new tail is parsed.
+# Keyed by path; `head` guards against the file having been replaced rather
+# than appended to, which a size check alone would miss.
+_hist_cache: dict = {}
+_hist_lock = threading.Lock()
+_HEAD_BYTES = 64
+
+
 def load_shelly_history(path=None) -> list:
     path = path or str(state_path(SHELLY_HISTORY_FILE))
-    out = []
-    try:
-        for line in io.open(path, encoding="utf-8"):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                row = json.loads(line)
-                row["_t"] = datetime.fromisoformat(row["at"])
-                out.append(row)
-            except (ValueError, KeyError):
-                continue
-    except OSError:
-        return []
-    out.sort(key=lambda r: r["_t"])
-    return out
+    with _hist_lock:
+        try:
+            size = os.path.getsize(path)
+            with open(path, "rb") as handle:
+                head = handle.read(_HEAD_BYTES)
+        except OSError:
+            _hist_cache.pop(path, None)
+            return []
+        c = _hist_cache.get(path)
+        if (c is None or size < c["offset"]
+                or head[:len(c["head"])] != c["head"]):
+            c = {"offset": 0, "head": head, "rows": []}
+        if size > c["offset"]:
+            with open(path, "rb") as handle:
+                handle.seek(c["offset"])
+                data = handle.read(size - c["offset"])
+            # Whole lines only: the recorder may be mid-write, and a torn
+            # last line must be picked up next time, not parsed half-formed.
+            data = data[:data.rfind(b"\n") + 1]
+            rows = c["rows"]
+            ordered = True
+            for line in data.decode("utf-8", "replace").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                    row["_t"] = datetime.fromisoformat(row["at"])
+                except (ValueError, KeyError):
+                    continue
+                if rows and row["_t"] < rows[-1]["_t"]:
+                    ordered = False
+                rows.append(row)
+            if not ordered:
+                rows.sort(key=lambda r: r["_t"])
+            c["offset"] += len(data)
+        _hist_cache[path] = c
+        return list(c["rows"])
 
 
 def shelly_usage(history, start, end) -> dict:
@@ -1955,6 +1987,9 @@ def main() -> int:
     print(f"dashboard on http://{args.bind}:{args.port}  "
           f"({len(hosts)} Shelly host(s), {len(labels)} label(s), "
           f"log {args.log})")
+    # Parse the plug history now, off the request path, so the first report
+    # page after a restart is not the one that pays for it.
+    threading.Thread(target=load_shelly_history, daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
