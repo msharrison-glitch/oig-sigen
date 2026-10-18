@@ -116,12 +116,30 @@ SHELLY_HISTORY_FILE = ".shelly-history.jsonl"
 # sources
 # --------------------------------------------------------------------------
 
+# Sigen refuses a login within a second of another (code 2028), and each
+# page load used to build one client per reader and log them all in at the
+# same instant -- so one always lost, and for the tariff series it was always
+# the same one. One shared client logs in once, under a lock; its token lasts
+# about a day and _call re-authenticates on expiry.
+_sigen_lock = threading.Lock()
+_sigen_client = None
+
+
+def shared_sigen_client():
+    """A logged-in Sigen cloud client, shared by every reader in this process."""
+    global _sigen_client
+    import sigencloud
+    with _sigen_lock:
+        if _sigen_client is None:
+            _sigen_client = sigencloud.client_from_env()
+        _sigen_client.ensure()
+        return _sigen_client
+
+
 def read_sigen() -> dict:
     """Live flow from the Sigen cloud. Never raises."""
     try:
-        import sigencloud
-        client = sigencloud.client_from_env()
-        client.ensure()
+        client = shared_sigen_client()
         data = client._call(
             "GET",
             f"device/sigen/station/energyflow/async"
@@ -923,9 +941,7 @@ def read_tariff_soc(day: str | None = None) -> dict:
     """
     day = day or datetime.now().strftime("%Y%m%d")
     try:
-        import sigencloud
-        client = sigencloud.client_from_env()
-        client.ensure()
+        client = shared_sigen_client()
         data = client._call(
             "GET",
             f"data-process/sigen/station/statistics/tariff-soc/day"
@@ -1976,9 +1992,7 @@ def period_range(name: str, today=None) -> tuple:
 def report_sigen(start, end, kind) -> dict:
     """Energy totals for the period. One call for a day or a month."""
     try:
-        import sigencloud
-        client = sigencloud.client_from_env()
-        client.ensure()
+        client = shared_sigen_client()
 
         def fetch(s, e, flag):
             data = client._call(

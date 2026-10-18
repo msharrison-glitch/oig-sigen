@@ -1125,6 +1125,38 @@ def main() -> int:
         dashboard.urllib.request.urlopen = real
         dashboard._shelly_down.clear()
 
+    print("\nConcurrent Sigen readers log in ONCE (it refuses two within 1 s)")
+    import sys, threading, types, time as _time
+    logins = []
+    class FakeClient:
+        station_id = "S1"
+        token = None
+        def ensure(self):
+            if self.token is None:
+                _time.sleep(0.05)          # a slow login, so threads overlap
+                logins.append(1)
+                self.token = "t"
+    fake = types.ModuleType("sigencloud")
+    fake.client_from_env = FakeClient
+    saved = sys.modules.get("sigencloud")
+    sys.modules["sigencloud"] = fake
+    dashboard._sigen_client = None
+    try:
+        got = []
+        ts = [threading.Thread(
+                target=lambda: got.append(dashboard.shared_sigen_client()))
+              for _ in range(4)]
+        [x.start() for x in ts]; [x.join() for x in ts]
+        check("four readers, one login", len(logins), 1)
+        check("and they all got the same client",
+              len({id(c) for c in got}), 1)
+    finally:
+        dashboard._sigen_client = None
+        if saved is not None:
+            sys.modules["sigencloud"] = saved
+        else:
+            del sys.modules["sigencloud"]
+
     print("\nPlug history is DIFFERENCED, because a plug only counts upwards")
     # A Shelly plug exposes a lifetime kWh counter and nothing else -- no
     # yesterday, no last week. Per-period consumption can only come from the
