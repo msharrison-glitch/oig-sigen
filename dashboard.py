@@ -563,7 +563,7 @@ def subtract_spans(spans, cuts) -> list:
     return [(a, b) for a, b in out if b > a]
 
 
-def schedule_row(confirmed, covered, now=None) -> str:
+def schedule_row(confirmed, covered, now=None, known=True) -> str:
     """The IOG schedule as one strip across today, 00:00 to 24:00.
 
     THREE states, and the distinction is the whole point. A planned dispatch
@@ -638,7 +638,13 @@ def schedule_row(confirmed, covered, now=None) -> str:
     # is claimed. A half-open test therefore never finds now inside it, and
     # the row read "pending" while the agent was holding and the car drawing:
     # backwards, and wrong in precisely the half hour the row exists for.
-    if inside(guar_all) or inside(conf, closed=True):
+    if inside(guar_all):
+        state, tone = "cheap", "cheap"     # fixed by contract, needs no log
+    elif not known:
+        # No agent log: "no bonus slots" and "cannot see any" look the same
+        # on the strip, and only one of them is true. Say which.
+        state, tone = "unknown", "muted"
+    elif inside(conf, closed=True):
         state, tone = "cheap", "cheap"
     elif inside(plan):
         state, tone = "pending", "muted"       # planned, car not yet drawing
@@ -776,6 +782,7 @@ def read_agent(log_path: str, state_file=None) -> dict:
         out["bonus"] = None           # unknown: the card falls back to Sigen
         out["bonus_windows"] = []
         out["covered_windows"] = []
+        out["windows_known"] = False
     with _agent_lock:
         _agent_cache.update(at=now, key=key, value=out)
     return out
@@ -1274,8 +1281,14 @@ def sparkline(points, width=320, height=48, fill=False,
             f'vector-effect="non-scaling-stroke"/></svg>')
 
 
+def _windows_known(agent) -> bool:
+    """True only if the agent log was read and its windows computed."""
+    agent = agent or {}
+    return not agent.get("error") and agent.get("windows_known", True)
+
+
 def tariff_block(tariff: dict, windows=(), off_peak_p=None,
-                 covered=()) -> str:
+                 covered=(), known=True) -> str:
     """Price and SOC for today, which is the question this project asks.
 
     The import series comes from Sigen, which knows only the static
@@ -1288,7 +1301,7 @@ def tariff_block(tariff: dict, windows=(), off_peak_p=None,
     # disappear exactly when the cloud was down and the page was least
     # informative. The guaranteed window alone always draws something.
     tariff = tariff or {}
-    rows = [schedule_row(windows, covered)]
+    rows = [schedule_row(windows, covered, known=known)]
     if tariff.get("error"):
         rows.append(f'<p class="empty">Tariff history unavailable &mdash; '
                     f'{escape(tariff["error"])}</p>')
@@ -1732,7 +1745,8 @@ footer code {{ font-size:.95em; }}
     {('<div class="panel"><h2>Today</h2>'
       + tariff_block(tariff, (snap.get("agent") or {}).get("bonus_windows") or (),
                      snap.get("off_peak_p"),
-                     (snap.get("agent") or {}).get("covered_windows") or ())
+                     (snap.get("agent") or {}).get("covered_windows") or (),
+                     known=_windows_known(snap.get("agent")))
       + '</div>')}
     <div class="panel">
       <h2>Agent &amp; cheap slots</h2>

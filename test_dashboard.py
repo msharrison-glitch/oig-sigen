@@ -1081,7 +1081,26 @@ def main() -> int:
           "IOG schedule" in no_tariff, True)
     check("and says plainly that Sigen's series are missing",
           "No tariff series" in no_tariff, True)
-    check("without inventing a price", "p</div>" in no_tariff, False)
+    import re as _re
+    # A price reads like "4.49p". The state word "cheap" ends in p too, so
+    # matching "p</div>" failed between 23:30 and 05:30 -- a daytime-only pass.
+    check("without inventing a price",
+          _re.search(r"\d\.\d+p", no_tariff) is None, True)
+
+    # Missing agent log: a confident "peak" would read as "no bonus slots".
+    day = dt.datetime(2026, 10, 18, 14, 0)
+    check("no log, outside the guaranteed window, says unknown",
+          ">unknown<" in dashboard.schedule_row([], [], now=day, known=False),
+          True)
+    check("no log inside the guaranteed window is still cheap",
+          ">cheap<" in dashboard.schedule_row(
+              [], [], now=dt.datetime(2026, 10, 18, 2, 0), known=False), True)
+    check("a read log with no slots is peak, not unknown",
+          ">peak<" in dashboard.schedule_row([], [], now=day), True)
+    check("an agent error means the windows are unknown",
+          dashboard._windows_known({"error": "OSError"}), False)
+    check("a computed-but-empty agent is known",
+          dashboard._windows_known({"bonus_windows": []}), True)
 
     print("\nPlug history is DIFFERENCED, because a plug only counts upwards")
     # A Shelly plug exposes a lifetime kWh counter and nothing else -- no
