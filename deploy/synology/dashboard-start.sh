@@ -46,7 +46,10 @@ BIND=0.0.0.0
 LOG=/var/log/oig-dashboard.log        # md0, survives a volume unmount
 
 # The circuits to poll. Names come from .shelly-labels.json beside the code.
-SHELLYS="192.168.2.16 192.168.2.43 192.168.2.149 192.168.2.158 192.168.2.191"
+# 192.168.2.16 (Kitchen) is deliberately absent: it stopped answering
+# 2026-10 and, drawing almost nothing, is not worth the 6 s timeout it
+# added to every cold page load. Add it back if it returns.
+SHELLYS="192.168.2.43 192.168.2.149 192.168.2.158 192.168.2.191"
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S'): $*" >> "$LOG"; }
 

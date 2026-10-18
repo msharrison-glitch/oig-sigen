@@ -11,7 +11,10 @@
 # the python interpreter, which a shell never is.
 cd "$(dirname "$0")" || exit 1
 PY=/usr/local/bin/python3.9
-SHELLYS="192.168.2.16 192.168.2.43 192.168.2.149 192.168.2.158 192.168.2.191"
+# 192.168.2.16 (Kitchen) is deliberately absent: it stopped answering
+# 2026-10 and, drawing almost nothing, is not worth the 6 s timeout it
+# added to every cold page load. Add it back if it returns.
+SHELLYS="192.168.2.43 192.168.2.149 192.168.2.158 192.168.2.191"
 
 for p in /proc/[0-9]*; do
     [ -r "$p/cmdline" ] || continue
