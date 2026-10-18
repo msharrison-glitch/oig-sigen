@@ -136,8 +136,31 @@ def shared_sigen_client():
         return _sigen_client
 
 
+SIGEN_TTL = timedelta(seconds=20)
+_sigen_cache: dict = {}          # key -> (when, value)
+
+
+def _cached(key, fn, ttl=SIGEN_TTL, now=None):
+    """fn()'s result, reused for ttl. FAILURES ARE CACHED TOO: an error is a
+    result here, and re-asking an unhappy cloud on every page load is how a
+    refreshing tab hammers an API that already rate-limits us."""
+    now = now or datetime.now()
+    with _sigen_lock:
+        hit = _sigen_cache.get(key)
+        if hit and now - hit[0] < ttl:
+            return hit[1]
+    value = fn()
+    with _sigen_lock:
+        _sigen_cache[key] = (now, value)
+    return value
+
+
 def read_sigen() -> dict:
-    """Live flow from the Sigen cloud. Never raises."""
+    """Live flow from the Sigen cloud, cached 20 s. Never raises."""
+    return _cached("flow", _read_sigen)
+
+
+def _read_sigen() -> dict:
     try:
         client = shared_sigen_client()
         data = client._call(
@@ -933,6 +956,11 @@ def label_for(device: dict, channel_id: str, labels: dict) -> str:
 
 
 def read_tariff_soc(day: str | None = None) -> dict:
+    day = day or datetime.now().strftime("%Y%m%d")
+    return _cached(("tariff", day), lambda: _read_tariff_soc(day))
+
+
+def _read_tariff_soc(day: str) -> dict:
     """Today's price and SOC, five-minute resolution, from the Sigen cloud.
 
     This is the series the whole project is about: BUY_TARIFF shows the IOG

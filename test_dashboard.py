@@ -1157,6 +1157,31 @@ def main() -> int:
         else:
             del sys.modules["sigencloud"]
 
+    print("\nSigen reads are cached for 20 s, failures included")
+    calls = []
+    def fn():
+        calls.append(1)
+        return {"n": len(calls)}
+    t0 = dt.datetime(2026, 10, 18, 15, 0, 0)
+    dashboard._sigen_cache.clear()
+    first = dashboard._cached("k", fn, now=t0)
+    again = dashboard._cached("k", fn, now=t0 + dt.timedelta(seconds=19))
+    check("a second load inside 20 s reuses the result",
+          (len(calls), again), (1, first))
+    dashboard._cached("k", fn, now=t0 + dt.timedelta(seconds=21))
+    check("after 20 s it asks again", len(calls), 2)
+    dashboard._cached("other", fn, now=t0)
+    check("different keys do not share a slot", len(calls), 3)
+    def failing():
+        calls.append(1)
+        return {"error": "SigenCloudError"}
+    n = len(calls)
+    dashboard._cached("bad", failing, now=t0)
+    dashboard._cached("bad", failing, now=t0 + dt.timedelta(seconds=5))
+    check("an error is cached too, not retried every load",
+          len(calls) - n, 1)
+    dashboard._sigen_cache.clear()
+
     print("\nPlug history is DIFFERENCED, because a plug only counts upwards")
     # A Shelly plug exposes a lifetime kWh counter and nothing else -- no
     # yesterday, no last week. Per-period consumption can only come from the
