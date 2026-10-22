@@ -1631,6 +1631,27 @@ def main() -> int:
     check("no external scripts", "<script" in html, False)
     check("no CDN references", "http://" in html.replace("http-equiv", ""), False)
 
+    print("\nThe TV page works on a 2017 webOS browser")
+    tv_flow = {"solar": 0.11, "load": 0.39, "battery": -9.1, "grid": 8.82,
+               "soc": 30.1, "ev": 0.0, "heat_pump": 0.0, "solar_today": 9.89}
+    tv_snap = {"at": dt.datetime(2026, 10, 22, 18, 5), "sigen": tv_flow,
+               "shellys": [], "agent": {"log": "x", "holding": True},
+               "heatpump": {"room": 21.4, "outdoor": 8, "heating": "on"}}
+    tv = dashboard.render_tv(tv_snap).decode()
+    check("no CSS variables (old Chromium has none)", "var(--" in tv, False)
+    check("no CSS grid", "grid" in tv.lower().replace("grid import", ""), False)
+    check("no script at all", "<script" in tv, False)
+    check("it refreshes itself", 'http-equiv="refresh"' in tv, True)
+    check("house load is shown", "0.39" in tv, True)
+    check("the heating state is shown", "heating on" in tv, True)
+    check("a held slot gets a banner", "Commanding a cheap slot" in tv, True)
+    tv_down = dashboard.render_tv(
+        {"at": dt.datetime(2026, 10, 22, 18, 5),
+         "sigen": {"error": "TimeoutError: cloud"}, "shellys": [],
+         "agent": {"log": "x"}}).decode()
+    check("a dead cloud shows a notice, not a stack trace",
+          "Sigen cloud unavailable" in tv_down, True)
+
     print("\n" + "=" * 70)
     if failures:
         print(f"{len(failures)} FAILED:")

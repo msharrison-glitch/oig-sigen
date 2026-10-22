@@ -1496,8 +1496,9 @@ def agent_block(agent: dict) -> str:
     return "".join(bits)
 
 
-def hero(snap: dict) -> str:
-    """The things worth seeing from across the room.
+def hero_cards(snap: dict) -> list:
+    """The things worth seeing from across the room, as (value, caption,
+    tone, sub) tuples -- shared by the phone page and the TV page.
 
     The export card carries the SPREAD against the overnight import rate:
     energy bought at 4.49p and sold at 16.94p is worth doing, and the same
@@ -1587,12 +1588,16 @@ def hero(snap: dict) -> str:
         cards.append((f"{today:.2f} kWh", "solar today", "solar",
                       "generated"))
 
+    return cards
+
+
+def hero(snap: dict) -> str:
     return "".join(
         f'<div class="card c-{tone}">'
         f'<div class="big">{escape(value)}</div>'
         f'<div class="cap">{escape(caption)}</div>'
         f'<div class="sub">{escape(sub)}</div></div>'
-        for value, caption, tone, sub in cards)
+        for value, caption, tone, sub in hero_cards(snap))
 
 
 def render(snap: dict) -> bytes:
@@ -1875,6 +1880,69 @@ class _KeyedCache:
             return value
 
 
+TV_REFRESH_SECONDS = 30
+
+# Literal colours, not CSS variables: the page is written for a 2017 LG
+# (webOS 3.5), whose browser is an old Chromium that has neither custom
+# properties nor grid. Floats and inline-blocks only, no script at all.
+TV_TONES = {"cheap": "#3fb98c", "peak": "#e0705e", "batt": "#e0589c",
+            "grid": "#5aa8e8", "ev": "#6cc24a", "heat": "#a98be0",
+            "solar": "#e0a93a", "house": "#9aa8b3"}
+
+
+def render_tv(snap: dict) -> bytes:
+    """A read-only wall display of the live state, for a TV browser."""
+    sigen = snap["sigen"]
+    cards = hero_cards(snap)
+    load = sigen.get("load")
+    if load is not None:
+        cards.insert(2, (f"{load:.2f}", "kW house", "house", "consuming"))
+    tiles = "".join(
+        f'<div class="t"><div class="in" style="border-left-color:'
+        f'{TV_TONES.get(tone, "#9aa8b3")}">'
+        f'<div class="v">{escape(value.split(" ")[0])}'
+        f'<span class="u">{escape(" ".join(value.split(" ")[1:]))}</span></div>'
+        f'<div class="c">{escape(caption)}</div>'
+        f'<div class="s">{escape(sub)}</div></div></div>'
+        for value, caption, tone, sub in cards)
+    banner = ""
+    if snap["agent"].get("holding"):
+        banner = ('<div class="ban">Commanding a cheap slot now &mdash; '
+                  'this import is at the off-peak rate</div>')
+    note = ""
+    if sigen.get("error"):
+        note = (f'<div class="ban bad">Sigen cloud unavailable &mdash; '
+                f'{escape(sigen["error"])}</div>')
+    return f"""<!doctype html><html><head><meta charset="utf-8">
+<meta http-equiv="refresh" content="{TV_REFRESH_SECONDS}">
+<title>Energy {snap['at']:%H:%M}</title>
+<style>
+html,body {{ margin:0; background:#0e1113; color:#e7ecef; }}
+body {{ font-family:Helvetica,Arial,sans-serif; padding:2vw; }}
+.top {{ overflow:hidden; margin-bottom:2vw; }}
+.top h1 {{ float:left; margin:0; font-size:3vw; font-weight:600; }}
+.top .when {{ float:right; font-size:3vw; color:#8b979e; }}
+.t {{ float:left; width:25%; }}
+.in {{ margin:0 1vw 2vw 0; padding:1.6vw 1.8vw; background:#161a1d;
+  height:13vw; overflow:hidden; border-left:.6vw solid #9aa8b3; }}
+.v {{ font-size:5.4vw; font-weight:700; line-height:1.05;
+  white-space:nowrap; }}
+.u {{ font-size:2.4vw; color:#8b979e; margin-left:.6vw; }}
+.c {{ font-size:2.2vw; color:#8b979e; margin-top:.5vw; }}
+.s {{ font-size:1.8vw; color:#b4bec4; margin-top:.4vw; min-height:2.2vw; }}
+.ban {{ clear:both; font-size:2.6vw; padding:1.2vw 1.8vw; margin-bottom:2vw;
+  background:#12352b; color:#3fb98c; }}
+.ban.bad {{ background:#3a1d18; color:#e0705e; }}
+.foot {{ clear:both; font-size:1.6vw; color:#5c6870; }}
+</style></head><body>
+<div class="top"><h1>8 Sycamore Ave</h1>
+<div class="when">{snap['at']:%a %d %b %H:%M}</div></div>
+{banner}{note}
+{tiles}
+<div class="foot">Refreshes every {TV_REFRESH_SECONDS} s &middot; read-only</div>
+</body></html>""".encode()
+
+
 def make_handler(shelly_hosts, log_path, cache, labels=None, history=True,
                  em_host=None, report_cache=None):
     report_cache = report_cache or _KeyedCache(REPORT_CACHE_SECONDS)
@@ -1890,6 +1958,10 @@ def make_handler(shelly_hosts, log_path, cache, labels=None, history=True,
             elif path in ("/", "/index.html"):
                 snap = cache.get(lambda: snapshot(shelly_hosts, log_path, labels, history))
                 body = render(snap)
+                ctype = "text/html; charset=utf-8"
+            elif path == "/tv":
+                snap = cache.get(lambda: snapshot(shelly_hosts, log_path, labels, history))
+                body = render_tv(snap)
                 ctype = "text/html; charset=utf-8"
             elif path == "/report":
                 import urllib.parse as _up
