@@ -136,6 +136,42 @@ def shared_sigen_client():
         return _sigen_client
 
 
+SIGEN_MIN_GAP = 1.1          # seconds between calls; see sigen_get
+SIGEN_RETRY_WAIT = 1.6
+_sigen_gate = threading.Lock()
+_sigen_last_call = [0.0]
+
+
+def sigen_get(path_for, sleep=time.sleep, clock=time.monotonic) -> dict:
+    """One GET against the Sigen cloud, spaced and retried.
+
+    Sigen answers HTTP 429 (`{"code":1}`) and occasionally 502 when two calls
+    arrive within about a second of each other, and the page makes the flow
+    call and the tariff call together on every refresh -- so the export
+    price dropped out of the page on roughly every other load. Calls are
+    therefore made one at a time, at least SIGEN_MIN_GAP apart, and a 429 or
+    502 is retried once after a pause.
+
+    `path_for` takes the client, because the station id is on it.
+    """
+    import sigencloud
+    client = shared_sigen_client()
+    with _sigen_gate:
+        for attempt in (1, 2):
+            wait = SIGEN_MIN_GAP - (clock() - _sigen_last_call[0])
+            if wait > 0:
+                sleep(wait)
+            try:
+                return client._call("GET", path_for(client))
+            except sigencloud.SigenCloudError as exc:
+                if attempt == 2 or not str(exc).startswith(
+                        ("HTTP 429", "HTTP 502", "HTTP 503")):
+                    raise
+                sleep(SIGEN_RETRY_WAIT)
+            finally:
+                _sigen_last_call[0] = clock()
+
+
 SIGEN_TTL = timedelta(seconds=20)
 _sigen_cache: dict = {}          # key -> (when, value)
 
@@ -162,12 +198,9 @@ def read_sigen() -> dict:
 
 def _read_sigen() -> dict:
     try:
-        client = shared_sigen_client()
-        data = client._call(
-            "GET",
+        data = sigen_get(lambda c: (
             f"device/sigen/station/energyflow/async"
-            f"?id={client.station_id}&refreshFlag=false",
-        ).get("data") or {}
+            f"?id={c.station_id}&refreshFlag=false")).get("data") or {}
     except Exception as exc:                      # noqa: BLE001 - deliberate
         return {"error": f"{type(exc).__name__}: {exc}"}
 
@@ -1001,12 +1034,10 @@ def _read_tariff_soc(day: str) -> dict:
     """
     day = day or datetime.now().strftime("%Y%m%d")
     try:
-        client = shared_sigen_client()
-        data = client._call(
-            "GET",
+        data = sigen_get(lambda c: (
             f"data-process/sigen/station/statistics/tariff-soc/day"
-            f"?stationId={client.station_id}&dt={day}&needPrediction=false",
-        ).get("data") or {}
+            f"?stationId={c.station_id}&dt={day}&needPrediction=false"
+        )).get("data") or {}
     except Exception as exc:                      # noqa: BLE001
         return {"error": f"{type(exc).__name__}"}
 
@@ -2215,13 +2246,11 @@ def report_sigen(start, end, kind, store=None, today=None) -> dict:
 
     try:
         def fetch(s, e, flag):
-            client = shared_sigen_client()
-            data = client._call(
-                "GET",
+            data = sigen_get(lambda c: (
                 f"data-process/sigen/station/statistics/v1/energy/custom"
-                f"?stationId={client.station_id}&startDate={s:%Y%m%d}"
+                f"?stationId={c.station_id}&startDate={s:%Y%m%d}"
                 f"&endDate={e:%Y%m%d}&dateFlag={flag}"
-                f"&resourceIds=energy_card").get("data") or {}
+                f"&resourceIds=energy_card")).get("data") or {}
             return {c.get("cardKey"): c.get("value")
                     for c in (data.get("stationCards") or [])}
 

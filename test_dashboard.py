@@ -1631,6 +1631,66 @@ def main() -> int:
     check("no external scripts", "<script" in html, False)
     check("no CDN references", "http://" in html.replace("http-equiv", ""), False)
 
+    print("\nSigen calls are spaced, and a 429 is retried once")
+    import sigencloud
+
+    class FakeClient:
+        station_id = "S1"
+        def __init__(self, script):
+            self.script, self.calls = list(script), 0
+        def ensure(self):
+            pass
+        def _call(self, method, path):
+            self.calls += 1
+            step = self.script.pop(0)
+            if isinstance(step, Exception):
+                raise step
+            return step
+
+    class Clock:
+        now = 100.0
+        slept = []
+        def __call__(self):
+            return self.now
+        def sleep(self, seconds):
+            self.slept.append(seconds)
+            self.now += seconds
+
+    def run(script, clock):
+        fake = FakeClient(script)
+        dashboard._sigen_client = fake
+        dashboard._sigen_last_call[0] = clock.now
+        try:
+            return fake, dashboard.sigen_get(lambda c: "p/" + c.station_id,
+                                             sleep=clock.sleep, clock=clock)
+        finally:
+            dashboard._sigen_client = None
+
+    clk = Clock()
+    fake, out = run([{"data": 1}], clk)
+    check("a call right after another waits out the gap",
+          round(sum(clk.slept), 2) == dashboard.SIGEN_MIN_GAP, True)
+    clk = Clock(); clk.now = 200.0; clk.slept = []
+    fake, out = run([sigencloud.SigenCloudError("HTTP 429: b'{\"code\":1}'"),
+                     {"data": 2}], clk)
+    check("a 429 is retried and the retry's answer returned",
+          (fake.calls, out), (2, {"data": 2}))
+    clk = Clock(); clk.slept = []
+    try:
+        run([sigencloud.SigenCloudError("HTTP 429: x")] * 2, clk)
+        gave_up = False
+    except sigencloud.SigenCloudError:
+        gave_up = True
+    check("two 429s in a row are raised, not retried forever", gave_up, True)
+    clk = Clock(); clk.slept = []
+    fake = None
+    try:
+        fake, _ = run([sigencloud.SigenCloudError("HTTP 401: x"),
+                       {"data": 3}], clk)
+    except sigencloud.SigenCloudError:
+        pass
+    check("other errors are not retried", fake is None, True)
+
     print("\nThe TV page works on a 2017 webOS browser")
     tv_flow = {"solar": 0.11, "load": 0.39, "battery": -9.1, "grid": 8.82,
                "soc": 30.1, "ev": 0.0, "heat_pump": 0.0, "solar_today": 9.89}
