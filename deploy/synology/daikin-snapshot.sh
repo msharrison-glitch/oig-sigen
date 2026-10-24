@@ -20,7 +20,8 @@ echo "$(date): invoked uid=$(id -u) user=$(id -un 2>/dev/null) pwd=$(pwd)" \
 
 set -e
 
-MIN_GAP=${MIN_GAP:-1700}          # seconds; 1700 = just under 29 minutes
+MIN_GAP=${MIN_GAP:-500}           # seconds; 500 = just under the 10-minute task
+                                  # (200 requests/day allowed, 144 used at this rate)
 
 HERE=$(cd "$(dirname "$0")" && pwd)
 if [ -f "$HERE/daikin.py" ]; then
