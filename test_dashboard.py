@@ -1631,6 +1631,41 @@ def main() -> int:
     check("no external scripts", "<script" in html, False)
     check("no CDN references", "http://" in html.replace("http-equiv", ""), False)
 
+    print("\nTomorrow's export prices get their own row")
+    tom = [(f"20261028 {h:02d}:{m:02d}", 0.10 + (0.15 if (h, m) == (17, 30)
+                                                 else 0.0))
+           for h in range(24) for m in range(0, 60, 5)]
+    today_series = {"SELL_TARIFF": [(f"20261027 {h:02d}:00", 0.12)
+                                    for h in range(24)],
+                    "BUY_TARIFF": [(f"20261027 {h:02d}:00", 0.28)
+                                   for h in range(24)]}
+    with_tom = dashboard.tariff_block(today_series, tomorrow=tom)
+    check("the row appears when tomorrow is published",
+          "Export tomorrow" in with_tom, True)
+    check("it names the best half hour", "best at 17:30" in with_tom, True)
+    check("and shows the best price", "25.00p" in with_tom, True)
+    check("it names the day", "Wed 28" in with_tom, True)
+    check("no row when tomorrow is not published",
+          "tomorrow" in dashboard.tariff_block(today_series), False)
+
+    print("\nA part-published tomorrow is not drawn")
+    orig = dashboard.read_tariff_soc
+    try:
+        dashboard.read_tariff_soc = lambda day=None, ttl=None: {
+            "SELL_TARIFF": tom[:100]}
+        check("a series cut off at lunchtime shows nothing",
+              dashboard.read_tomorrow_export(), [])
+        dashboard.read_tariff_soc = lambda day=None, ttl=None: {
+            "SELL_TARIFF": tom}
+        check("a full day is passed through",
+              len(dashboard.read_tomorrow_export()), len(tom))
+        dashboard.read_tariff_soc = lambda day=None, ttl=None: {
+            "error": "SigenCloudError"}
+        check("an error shows nothing, not a crash",
+              dashboard.read_tomorrow_export(), [])
+    finally:
+        dashboard.read_tariff_soc = orig
+
     print("\nSigen calls are spaced, and a 429 is retried once")
     import sigencloud
 

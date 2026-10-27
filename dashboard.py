@@ -173,6 +173,7 @@ def sigen_get(path_for, sleep=time.sleep, clock=time.monotonic) -> dict:
 
 
 SIGEN_TTL = timedelta(seconds=20)
+TOMORROW_MIN_POINTS = 264        # of 288 five-minute points; 276 seen live
 _sigen_cache: dict = {}          # key -> (when, value)
 
 
@@ -1020,9 +1021,27 @@ def label_for(device: dict, channel_id: str, labels: dict) -> str:
     return (device.get("name") or device.get("model") or device["host"])
 
 
-def read_tariff_soc(day: str | None = None) -> dict:
+def read_tariff_soc(day: str | None = None, ttl=SIGEN_TTL) -> dict:
     day = day or datetime.now().strftime("%Y%m%d")
-    return _cached(("tariff", day), lambda: _read_tariff_soc(day))
+    return _cached(("tariff", day), lambda: _read_tariff_soc(day), ttl=ttl)
+
+
+TOMORROW_TTL = timedelta(minutes=5)
+
+
+def read_tomorrow_export() -> list:
+    """Tomorrow's Agile Outgoing prices as (label, value) points, or [].
+
+    Octopus publishes them around 4pm, so before then the series is absent
+    or partial -- and a partial day is not shown, because a line that stops
+    at lunchtime reads as "the price falls to nothing". Cached longer than
+    the live reads: published prices do not move, and every extra Sigen call
+    is spaced a second apart.
+    """
+    day = (datetime.now() + timedelta(days=1)).strftime("%Y%m%d")
+    series = read_tariff_soc(day, ttl=TOMORROW_TTL)
+    points = [] if series.get("error") else (series.get("SELL_TARIFF") or [])
+    return points if len(points) >= TOMORROW_MIN_POINTS else []
 
 
 def _read_tariff_soc(day: str) -> dict:
@@ -1063,6 +1082,7 @@ def snapshot(shelly_hosts, log_path, labels=None, history=False) -> dict:
         zappi = pool.submit(read_zappi)
         heatpump = pool.submit(read_heatpump)
         tariff = pool.submit(read_tariff_soc) if history else None
+        tomorrow = pool.submit(read_tomorrow_export) if history else None
         shellys = [pool.submit(read_shelly, h) for h in shelly_hosts]
         result["sigen"] = sigen.result()
         result["agent"] = agent.result()
@@ -1070,6 +1090,7 @@ def snapshot(shelly_hosts, log_path, labels=None, history=False) -> dict:
         result["heatpump"] = heatpump.result()
         result["shellys"] = [f.result() for f in shellys]
         result["tariff_soc"] = tariff.result() if tariff else {}
+        result["tomorrow_export"] = tomorrow.result() if tomorrow else []
     # The same .env rate costs.py prices with, so the card and the money
     # figures cannot disagree about what off-peak costs.
     import costs
@@ -1408,8 +1429,32 @@ def _windows_known(agent) -> bool:
     return not agent.get("error") and agent.get("windows_known", True)
 
 
+def _tomorrow_row(points, pence) -> str:
+    """Tomorrow's export line, on its own 00:00-24:00 axis.
+
+    Deliberately a SEPARATE row rather than a 48-hour axis: the strip, import
+    price and SOC above have nothing to say about tomorrow, and stretching
+    them would leave half of each empty. The cost is that the two export
+    lines do not share an x axis, so the column reading used on today's rows
+    does not carry across. The right-hand figure is the BEST price, with its
+    time beside the name -- the half hour worth planning a discharge for.
+    """
+    priced = [(label, v) for label, v in points if v is not None]
+    best_label, best = max(priced, key=lambda item: item[1])
+    day = datetime.strptime(priced[0][0], "%Y%m%d %H:%M").strftime("%a %d")
+    return (
+        f'<div class="sparkrow">'
+        f'<div class="sname">Export tomorrow'
+        f'<span class="srange">{escape(day)} &middot; best at '
+        f'{escape(best_label[-5:])}</span></div>'
+        f'<div class="sline g-cheap">{sparkline(points, fill=True)}'
+        f'{hover_bands(points, pence)}</div>'
+        f'<div class="snow">{pence(best)}</div>'
+        f'</div>')
+
+
 def tariff_block(tariff: dict, windows=(), off_peak_p=None,
-                 covered=(), known=True) -> str:
+                 covered=(), known=True, tomorrow=()) -> str:
     """Price and SOC for today, which is the question this project asks.
 
     The import series comes from Sigen, which knows only the static
@@ -1463,6 +1508,8 @@ def tariff_block(tariff: dict, windows=(), off_peak_p=None,
             f'<div class="sline g-{tone}">{sparkline(points, fill=True)}{hover_bands(points, fmt)}</div>'
             f'<div class="snow">{now}</div>'
             f'</div>')
+        if key == "SELL_TARIFF" and tomorrow:
+            rows.append(_tomorrow_row(tomorrow, pence))
     if len(rows) == 1:          # the strip, and nothing from Sigen
         rows.append('<p class="empty">No tariff series for today yet.</p>')
     if any(" *" in row for row in rows):
@@ -1854,7 +1901,8 @@ footer code {{ font-size:.95em; }}
       + tariff_block(tariff, (snap.get("agent") or {}).get("bonus_windows") or (),
                      snap.get("off_peak_p"),
                      (snap.get("agent") or {}).get("covered_windows") or (),
-                     known=_windows_known(snap.get("agent")))
+                     known=_windows_known(snap.get("agent")),
+                     tomorrow=snap.get("tomorrow_export") or ())
       + '</div>')}
     <div class="panel">
       <h2>Agent &amp; cheap slots</h2>
